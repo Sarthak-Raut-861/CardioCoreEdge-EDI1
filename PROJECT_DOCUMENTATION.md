@@ -84,6 +84,7 @@ cardiovascular_twin/
 │   ├── explainability.py    # Factor attribution + SHAP
 │   └── model_training.py    # Leakage-safe ML training pipeline
 ├── dashboard/app.py         # Streamlit dashboard (11 sections)
+├── web/                     # Patient portal: FastAPI + SPA (auth, wizard, dashboard)
 ├── models/                  # Trained artifacts (risk_model.joblib + metrics)
 ├── data/raw/                # Datasets (git-ignored; auto-downloaded)
 └── tests/                   # 131 pytest tests
@@ -537,7 +538,14 @@ Calibration: isotonic (Platt alternative)
 | SciPy / joblib | pinned | sklearn dependency, model persistence |
 | pytest | — | 131 tests |
 
-Documented-but-not-yet-wired (future): FastAPI service layer, paho-MQTT /
+**Patient portal (`web/`)**: FastAPI serves both the JSON API (signup/login with
+PBKDF2-hashed passwords + bearer tokens, profile questionnaire storage in SQLite,
+`twin/simulate` endpoint that runs the full engine server-side) and the static
+single-page frontend (vanilla JS + hand-rolled design system; onboarding wizard
+collects all patient-side factor inputs; results dashboard with SVG gauge/radar/
+sparkline charts). 11 tests cover the logic layer.
+
+Documented-but-not-yet-wired (future): paho-MQTT /
 pyserial / Bleak sensor ingestion, NeuroKit2/biosppy biosignal processing,
 SQLite/SQLAlchemy storage.
 

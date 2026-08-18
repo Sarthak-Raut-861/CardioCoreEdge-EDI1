@@ -42,6 +42,25 @@ Alongside: the wearable factor engine (`factor_engine.py`) with EWMA state
 assimilation, adaptive weights and confidence intervals (`adaptive_engine.py`),
 phenotype clustering and the real-data XGBoost model (holdout AUC 0.925).
 
+## Patient portal (web app)
+
+`web/` contains a production-style patient website — FastAPI backend + vanilla
+SPA frontend (no build step):
+
+- **Signup / login** — PBKDF2-hashed passwords, 7-day session tokens, SQLite storage
+- **4-step onboarding wizard** — collects every patient-side input of the 72-factor
+  framework (demographics, medical history, lifestyle, diet, smoking, optional known
+  lab values) with live BMI, sliders and toggles
+- **Results dashboard** — CVD risk gauge, thrombosis risk, 6 biomarker cards with
+  clinical categories, pathway bars, radar, explainable top-5 drivers, graded alerts,
+  60-day trajectory, searchable 72-factor table, what-if scenarios
+- **Backend reuses the real engine** — the saved questionnaire builds a `UserProfile`,
+  the simulator + `BiomarkerTwin` produce the estimates server-side
+
+```bash
+cd cardiovascular_twin/web && uvicorn server:app --port 8502   # http://localhost:8502
+```
+
 ## Quick start
 
 ```bash

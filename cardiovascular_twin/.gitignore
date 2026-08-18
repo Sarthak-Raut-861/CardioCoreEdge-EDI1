@@ -11,4 +11,4 @@ data/raw/
 dist/
 build/
 .pytest_cache/
-*.log
+*.log*.db
