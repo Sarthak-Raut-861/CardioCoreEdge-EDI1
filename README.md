@@ -1,5 +1,10 @@
 # CardioCoreEdge-EDI1
 AI-Driven Personalized Cardiovascular Digital Twin for Continuous Cardiac Risk Assessment Using Multimodal Wearable Sensing
+
+> 📘 **New to the project?** Read [`PROJECT_DOCUMENTATION.md`](PROJECT_DOCUMENTATION.md) —
+> the complete guide to every concept, formula, algorithm, constant and
+> technology used in this codebase (72-factor framework, biomarker equations,
+> digital-twin mechanics, self-learning engine, clustering, ML pipeline, XAI).
 Overview
 
 CardioCore is an intelligent cardiovascular health monitoring system that combines wearable sensing, Artificial Intelligence (AI), and Digital Twin technology to provide continuous and personalised cardiac health assessment.
