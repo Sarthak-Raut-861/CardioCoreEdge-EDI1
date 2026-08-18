@@ -96,53 +96,47 @@ def final_report(twin: DigitalTwin, history: pd.DataFrame) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def train_cohort_model(seed: int = 0) -> tuple:
-    """Train a demo XGBoost risk model on a simulated cohort.
+def ml_report(twin: DigitalTwin, model_path: str | None = None) -> None:
+    """Load (or train) the real risk model and score the twin's state with SHAP."""
+    from pathlib import Path
 
-    NOTE: labels come from the rule-based composite itself, so this is a
-    demonstration of the ML plumbing (train -> attach -> SHAP), not a
-    clinically meaningful model.
-    """
-    from xgboost import XGBClassifier
+    from src.model_training import ensure_dataset, load_artifact, load_dataset, save_artifact, train_risk_model, twin_feature_vector
 
-    rng = np.random.default_rng(seed)
-    rows: List[Dict] = []
-    labels: List[int] = []
-    presets = list(PRESET_PROFILES.values())
-    for i in range(24):
-        base = presets[i % 3]
-        scen = ["stable", "improving", "declining"][i % 3]
-        df = simulate_history(45, profile=base, scenario=scen, seed=int(rng.integers(1e6)))
-        df = df.ffill()
-        for _, r in df.iterrows():
-            obs = {k: float(r[k]) for k in DEFAULT_FEATURES if k in r.index}
-            labs = None
-            if "total_cholesterol" in r.index and not pd.isna(r.get("total_cholesterol")):
-                labs = {k: float(r[k]) for k in ("total_cholesterol", "hdl", "triglycerides")}
-            score = FactorEngine.evaluate_all(obs, labs, base.to_dict()).score
-            rows.append({**obs, **(labs or {})})
-            labels.append(int(score >= 0.5))
+    print("\n--- ML LAYER (real-data risk model) -----------------------------")
+    artifact = None
+    path = Path(model_path or "models/risk_model.joblib")
+    if path.exists():
+        artifact = load_artifact(path)
+        print(f"Loaded trained model from {path} ({artifact['model_name']}, "
+              f"holdout AUC {artifact['holdout_calibrated']['roc_auc']})")
+    else:
+        print("No trained model found - training on the UCI-combined dataset ...")
+        data_path = ensure_dataset()
+        artifact = train_risk_model(load_dataset(data_path), tune=False)
+        save_artifact(artifact, "models", training_df=load_dataset(data_path))
 
-    X = pd.DataFrame(rows).fillna(0.0)
-    y = np.array(labels)
-    model = XGBClassifier(n_estimators=120, max_depth=3, learning_rate=0.15,
-                          eval_metric="logloss", verbosity=0)
-    model.fit(X.values, y)
-    return model, list(X.columns)
+    # twin state -> model feature row
+    ref_df = artifact.get("data_sample")
+    if ref_df is None:
+        ref_df = load_dataset(ensure_dataset())
+    row = twin_feature_vector(twin, ref_df)
+    prob = float(artifact["model"].predict_proba(row)[0, 1])
+    print(f"Twin-state risk probability: {prob:.2f} "
+          f"(threshold {artifact['threshold']:.2f} -> "
+          f"{'HIGH' if prob >= artifact['threshold'] else 'low'} risk)")
 
-
-def ml_report(twin: DigitalTwin) -> None:
-    print("\n--- ML LAYER (demo cohort model) --------------------------------")
-    model, features = train_cohort_model()
-    twin.attach_model(model, features)
-    x = {f: twin.state.get(f, (twin.labs or {}).get(f)) for f in features}
-    X = pd.DataFrame([{k: float(v) if v is not None else 0.0 for k, v in x.items()}])[features]
-    prob = twin.ml_risk()
-    print(f"Attached XGBoost model on {len(features)} features -> twin-state risk probability: {prob:.2f}")
-    sh = RiskExplainer.explain_model_prediction(model, X)
-    print(f"SHAP base value: {sh['base_value']:.2f}; top drivers: {', '.join(sh['top_risk_drivers'] or ['none'])}")
-    for c in sh["contributions"][:5]:
-        print(f"    {c['feature']:<22} shap={c['shap_value']:+.3f}")
+    # SHAP attribution through the pipeline's preprocessing
+    try:
+        prep = artifact["raw_model"].named_steps["prep"]
+        clf = artifact["raw_model"].named_steps["clf"]
+        Xt = pd.DataFrame(prep.transform(row), columns=prep.get_feature_names_out())
+        sh = RiskExplainer.explain_model_prediction(clf, Xt)
+        print(f"SHAP base value {sh['base_value']:.2f}; top drivers: "
+              f"{', '.join(sh['top_risk_drivers'] or ['none'])}")
+        for c in sh["contributions"][:5]:
+            print(f"    {c['feature']:<28} shap={c['shap_value']:+.3f}")
+    except Exception as exc:  # SHAP optional in this report
+        print(f"(SHAP attribution skipped: {exc})")
 
 
 # --------------------------------------------------------------------------- #

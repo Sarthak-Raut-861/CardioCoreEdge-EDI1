@@ -50,12 +50,47 @@ python -m pytest tests/ -q
 Data source is abstracted behind `WearableDataSource` — a CSV/cloud-API
 implementation can be plugged in later without touching the twin.
 
+## Training the ML risk model (real data)
+
+```bash
+cd cardiovascular_twin
+python train_model.py            # auto-downloads the UCI-combined dataset, trains + tunes + calibrates
+python train_model.py --data data/raw/my_other_dataset.csv --target-col target
+python main.py --profile at_risk --ml    # score a live twin state with the trained model (+ SHAP)
+```
+
+Pipeline: leakage-safe imputation (impossible zeros -> NaN -> fold-fitted
+median) -> 80/20 stratified split -> LR / RF / XGBoost bake-off (5-fold CV
+AUC) -> XGBoost grid search -> Youden-J threshold from out-of-fold
+predictions -> isotonic probability calibration -> permutation importances.
+
+**Results on the UCI-combined dataset (918 records):**
+holdout ROC-AUC **0.925**, accuracy **0.90**, sensitivity **0.93**,
+specificity **0.85** (see `models/metrics.json`).
+
+### Where to get (more) training data
+
+| Dataset | Records | Label | Access |
+|---|---|---|---|
+| UCI Heart Disease (combined: Cleveland+Hungarian+Switzerland+Statlog) | 918 | CAD diagnosis | auto-downloaded by `train_model.py` |
+| Framingham Heart Study (Kaggle: `aasheesh200/framingham-heart-study-dataset`) | ~4,240 | 10-year CHD outcome | Kaggle (free account) |
+| Cardiovascular Disease dataset (Kaggle: `sulianova/cardiovascular-disease-dataset`) | 70,000 | CVD presence | Kaggle (free account) |
+| NHANES (CDC) | 100k+ | risk factors + mortality linkage | free download |
+| MIMIC-IV / PhysioNet (WESAD, PPG-DaLiA) | varies | signals (ECG/PPG) for wearable features | PhysioNet credentialing |
+| UK Biobank / All of Us | 100k+ | long-term outcomes + accelerometer | institutional application |
+
+To use a Kaggle CSV: download it, drop it in `data/raw/`, then
+`python train_model.py --data data/raw/<file>.csv --target-col <label column>`.
+Column names differing from the UCI schema can be mapped in
+`src/model_training.py` (`NUMERIC`/`CATEGORICAL`).
+
 ## Status
 
 - [x] Core engine (`src/`) — simulator, lipids, factor engine, digital twin, clustering, explainability
 - [x] Test suite (66 tests)
 - [ ] Streamlit dashboard (`dashboard/app.py`)
 - [ ] FastAPI service layer
+- [x] ML risk model trained on real data (UCI-combined, 918 records, holdout AUC 0.925)
 - [ ] Real wearable-data ingestion (CSV export / cloud API)
 
 ## Disclaimer
