@@ -1,6 +1,5 @@
 """Tests for the patient-portal backend (web/server.py) — logic layer."""
 
-import json
 import sys
 from pathlib import Path
 
@@ -56,8 +55,8 @@ class TestProfileFlow:
         res = temp_db.signup(server.SignupIn(email="p@q.r", name="Pat", password="secret123"))
         hdr = {"Authorization": f"Bearer {res['token']}"}
         prof = server.ProfileIn(age=44, sex="female", height_cm=165, weight_kg=68,
-                                waist_cm=82, hip_cm=98, smoker=False, diabetic=False,
-                                family_history=True)
+                                waist_cm=82, hip_cm=98, smoke_status="never",
+                                diabetic=False, family_history=True)
         out = temp_db.save_profile(prof, hdr["Authorization"])
         assert out["has_profile"] is True
 
@@ -70,20 +69,76 @@ class TestProfileFlow:
             server.ProfileIn(age=10, sex="male", height_cm=180, weight_kg=80)  # under 18
         with pytest.raises(Exception):
             server.ProfileIn(age=40, sex="alien", height_cm=180, weight_kg=80)
+        with pytest.raises(Exception):
+            server.ProfileIn(age=40, sex="male", height_cm=180, weight_kg=80, sat_fat_freq="weekly")
+
+
+class TestQuestionnaireMappings:
+    """Patient-friendly answers -> 0-1 factor values (doc normalization)."""
+
+    def test_frequency_map(self):
+        assert server.FREQ_MAP["never"] == 0.05
+        assert server.FREQ_MAP["very_often"] == 0.95
+        assert list(server.FREQ_MAP) == ["never", "rarely", "sometimes", "often", "very_often"]
+
+    def test_smoking_scores_current(self):
+        intensity, py = server.smoking_scores("current", 20, 10)   # 20/day for 10y
+        assert py == pytest.approx(10.0)                           # 20*10/20
+        assert intensity == 0.75
+
+    def test_smoking_scores_former_keeps_pack_years(self):
+        intensity, py = server.smoking_scores("former", 40, 15)    # 40/day for 15y
+        assert py == pytest.approx(30.0)
+        assert intensity == 0.0                                     # not a current smoker
+
+    def test_smoking_scores_intensity_bands(self):
+        assert server.smoking_scores("current", 3, 5)[0] == 0.3
+        assert server.smoking_scores("current", 8, 5)[0] == 0.5
+        assert server.smoking_scores("current", 25, 5)[0] == 1.0
+
+    def test_ethnicity_map(self):
+        assert server.ETHNICITY_MAP["south_asian"] > server.ETHNICITY_MAP["european"]
+
+    def test_profile_mapping_end_to_end(self):
+        p = {"age": 52, "sex": "male", "height_cm": 172, "weight_kg": 92,
+             "waist_cm": 104, "hip_cm": 106, "ethnicity": "south_asian",
+             "diabetic": True, "high_chol": True, "hypertension": False, "clot": False,
+             "thyroid": False, "family_history": True,
+             "sat_fat_freq": "often", "sugar_freq": "often", "veg_freq": "rarely",
+             "alcohol_freq": "sometimes", "omega3_freq": "rarely",
+             "smoke_status": "current", "cigarettes_per_day": 15, "years_smoked": 20}
+        up = server.profile_to_user_profile(p)
+        assert up.age == 52
+        assert up.bmi == pytest.approx(92 / 1.72 ** 2, abs=0.05)
+        assert up.waist_hip_ratio == pytest.approx(104 / 106, abs=0.01)
+        assert up.ethnicity_risk == server.ETHNICITY_MAP["south_asian"]
+        assert up.diabetic and up.family_history
+        assert up.chol_history == pytest.approx(0.85)
+        assert up.htn_history == pytest.approx(0.05)
+        assert up.sat_fat == server.FREQ_MAP["often"]
+        assert up.vegetables == 1 - server.FREQ_MAP["rarely"]     # inverted (protective)
+        assert up.omega3 == 1 - server.FREQ_MAP["rarely"]
+        assert up.smoker is True
+        assert up.pack_years == pytest.approx(15.0)               # 15*20/20
+        assert up.smoking_intensity == 0.75
+
+    def test_protective_frequencies_inverted(self):
+        p = {"age": 30, "sex": "female", "height_cm": 165, "weight_kg": 60,
+             "veg_freq": "very_often", "omega3_freq": "very_often", "smoke_status": "never"}
+        up = server.profile_to_user_profile(p)
+        assert up.vegetables == pytest.approx(1 - 0.95)
+        assert up.omega3 == pytest.approx(1 - 0.95)
+        assert up.smoker is False and up.pack_years == 0
 
 
 class TestEngineBridge:
     PROFILE = {"age": 56, "sex": "male", "height_cm": 172, "weight_kg": 92,
-               "waist_cm": 104, "hip_cm": 106, "ethnicity_risk": 0.5,
-               "diabetic": True, "family_history": True, "chol_history": 0.8,
-               "smoker": True, "pack_years": 28, "sat_fat": 0.8, "sugar": 0.75,
-               "vegetables": 0.2, "alcohol": 0.6, "omega3": 0.15}
-
-    def test_profile_mapping(self):
-        up = server.profile_to_user_profile(self.PROFILE)
-        assert up.age == 56 and up.bmi == pytest.approx(92 / 1.72 ** 2, abs=0.05)
-        assert up.waist_hip_ratio == pytest.approx(104 / 106, abs=0.01)
-        assert up.smoker and up.diabetic
+               "waist_cm": 104, "hip_cm": 106, "ethnicity": "south_asian",
+               "diabetic": True, "high_chol": True, "hypertension": True,
+               "clot": True, "thyroid": False, "family_history": True,
+               "sat_fat_freq": "very_often", "sugar_freq": "very_often",
+               "veg_freq": "rarely", "alcohol_freq": "often", "omega3_freq": "rarely",
+               "smoke_status": "current", "cigarettes_per_day": 25, "years_smoked": 25}
 
     def test_run_twin_estimate_shape(self):
         r = server.run_twin_estimate(self.PROFILE, days=45, scenario="declining")
@@ -92,6 +147,11 @@ class TestEngineBridge:
         assert len(r["factors"]) == 72
         assert len(r["trajectory"]) == 45
         assert r["cluster"]["label"] in ("Low Risk", "Moderate Risk", "High Risk", "Very High Risk")
+        assert r["patient"]["age"] == 56
+        assert r["patient"]["pack_years"] == pytest.approx(31.25, abs=0.1)  # 25*25/20
+        assert len(r["cluster"]["scatter"]) > 20
+        assert len(r["wearable_status"]) == 9
+        import json
         assert json.dumps(r)  # fully JSON-serializable
 
     def test_scenarios_differentiate(self):
@@ -100,10 +160,10 @@ class TestEngineBridge:
         assert dec > imp
 
     def test_at_risk_higher_than_healthy(self):
-        healthy = dict(self.PROFILE, age=32, weight_kg=62, height_cm=175,
-                       diabetic=False, smoker=False, family_history=False,
-                       waist_cm=80, hip_cm=96, chol_history=0.1,
-                       sat_fat=0.2, sugar=0.2, vegetables=0.85, alcohol=0.05, omega3=0.8)
+        healthy = {"age": 32, "sex": "female", "height_cm": 165, "weight_kg": 60,
+                   "ethnicity": "european", "smoke_status": "never",
+                   "veg_freq": "very_often", "omega3_freq": "very_often",
+                   "sat_fat_freq": "rarely", "sugar_freq": "rarely", "alcohol_freq": "never"}
         h = server.run_twin_estimate(healthy, scenario="stable")
         a = server.run_twin_estimate(self.PROFILE, scenario="stable")
         assert a["cvd_score"] > h["cvd_score"] + 0.1

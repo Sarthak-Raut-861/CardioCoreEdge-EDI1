@@ -272,3 +272,78 @@ table.factors tr:hover td { background: #FAFBFD; }
 
 .fade-in { animation: fade .35s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } }
+
+/* ============================================================
+   v2 — questionnaire + dashboard additions
+   ============================================================ */
+
+/* segmented yes/no + frequency controls */
+.yesno { display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  background: #FBFCFD; border: 1px solid var(--line); border-radius: var(--radius-s);
+  padding: 14px 16px; margin-bottom: 10px; }
+.yesno .q, .freqq .q { font-size: 14.5px; font-weight: 600; }
+.yesno .qsub, .freqq .qsub { font-size: 12.5px; color: var(--faint); font-weight: 400; margin-top: 2px; }
+.freqq { margin-bottom: 18px; }
+.seg { display: inline-flex; background: #EEF1F5; border-radius: 11px; padding: 4px; gap: 2px; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; cursor: pointer; }
+.seg span { display: block; padding: 8px 16px; border-radius: 8px; font-size: 13.5px; font-weight: 600;
+  color: var(--muted); cursor: pointer; transition: .15s; white-space: nowrap; }
+.seg input:checked + span { background: #fff; color: var(--ink); box-shadow: var(--shadow-sm); }
+.seg.wide { display: flex; width: 100%; }
+.seg.wide label { flex: 1; }
+.seg.wide span { text-align: center; }
+.seg.wide input:checked + span { background: var(--accent); color: #fff; }
+.seg label:first-child span { border-radius: 8px; }
+
+/* live-calculated chips (BMI / WHR / pack-years) */
+.calc-chips { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.chip-calc { background: #FBFCFD; border: 1px dashed var(--line); border-radius: 999px;
+  padding: 8px 16px; font-size: 13.5px; color: var(--muted); }
+
+/* dashboard header */
+.dash-header { display: flex; justify-content: space-between; align-items: center; gap: 14px;
+  padding: 20px 24px; margin-bottom: 18px; flex-wrap: wrap; }
+.dash-header h2 { font-size: 22px; font-weight: 800; letter-spacing: -.3px; }
+.status-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* pathway cards */
+.path-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .path-grid { grid-template-columns: 1fr; } }
+.path-card { display: flex; gap: 12px; align-items: center; background: #FBFCFD;
+  border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px 14px; }
+.path-card .p-emoji { font-size: 22px; }
+.path-card .p-body { flex: 1; }
+.path-card .p-name { font-size: 13.5px; font-weight: 700; }
+.path-card .p-status { font-size: 12px; font-weight: 700; }
+
+/* lipid / baseline tables */
+table.lipids { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.lipids th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--faint); padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.lipids td { padding: 11px 12px; border-bottom: 1px solid #F1F4F8; white-space: nowrap; }
+table.lipids tr:hover td { background: #FAFBFD; }
+
+/* inflammation cards */
+.infl-card .infl-val { font-size: 40px; font-weight: 800; letter-spacing: -1.5px; margin: 8px 0 10px; }
+.infl-card .infl-val small { font-size: 15px; color: var(--faint); font-weight: 600; }
+
+/* AI narrative */
+.ai-narrative { background: #FBFCFD; border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: var(--radius-s); padding: 16px 18px; font-size: 14px; }
+.ai-narrative p { margin-top: 8px; color: #334155; line-height: 1.6; }
+
+/* cluster legend */
+.cluster-legend { display: flex; flex-direction: column; gap: 10px; }
+.cluster-legend .leg { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 600; color: var(--muted); }
+.cluster-legend .leg.me { color: var(--ink); }
+.cluster-legend .leg .dot { width: 10px; height: 10px; border-radius: 50%; }
+
+/* sensor grid */
+.sensor-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 4px; }
+@media (max-width: 700px) { .sensor-grid { grid-template-columns: repeat(2, 1fr); } }
+.sensor { display: flex; align-items: center; gap: 10px; background: #FBFCFD;
+  border: 1px solid var(--line); border-radius: var(--radius-s); padding: 11px 14px; }
+.sensor .s-ico { font-size: 16px; }
+.sensor .s-name { font-size: 13px; font-weight: 600; flex: 1; }
+.sensor .s-dot { width: 9px; height: 9px; border-radius: 50%; box-shadow: 0 0 0 3px #12876F22; }

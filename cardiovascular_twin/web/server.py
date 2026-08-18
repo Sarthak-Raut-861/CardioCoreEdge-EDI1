@@ -143,31 +143,59 @@ class ProfileIn(BaseModel):
     weight_kg: float = Field(gt=30, le=300)
     waist_cm: Optional[float] = Field(default=None, ge=50, le=200)
     hip_cm: Optional[float] = Field(default=None, ge=50, le=220)
-    ethnicity_risk: float = Field(default=0.3, ge=0, le=1)
-    # medical history (F55-F60)
-    diabetic: bool = False
-    chol_history: float = Field(default=0.2, ge=0, le=1)
-    htn_history: float = Field(default=0.1, ge=0, le=1)
-    clot_history: float = Field(default=0.0, ge=0, le=1)
-    thyroid: float = Field(default=0.05, ge=0, le=1)
-    family_history: bool = False
-    # lifestyle & diet (F61-F67)
-    smoker: bool = False
-    smoking_intensity: float = Field(default=0.6, ge=0, le=1)
-    pack_years: float = Field(default=12.0, ge=0, le=80)
-    sat_fat: float = Field(default=0.3, ge=0, le=1)
-    sugar: float = Field(default=0.3, ge=0, le=1)
-    vegetables: float = Field(default=0.6, ge=0, le=1)
-    alcohol: float = Field(default=0.2, ge=0, le=1)
-    omega3: float = Field(default=0.5, ge=0, le=1)
-    # optional known baselines
-    baseline_resting_hr: float = Field(default=64, ge=35, le=130)
-    baseline_hrv_rmssd: float = Field(default=48, ge=8, le=180)
-    baseline_systolic: float = Field(default=122, ge=80, le=220)
-    baseline_diastolic: float = Field(default=79, ge=50, le=140)
-    baseline_total_cholesterol: float = Field(default=195, ge=100, le=400)
-    baseline_hdl: float = Field(default=50, ge=20, le=120)
-    baseline_triglycerides: float = Field(default=140, ge=40, le=600)
+    ethnicity: str = Field(default="other")          # category, mapped to F52 score
+    # medical history (F55-F60) — simple yes/no questions
+    diabetic: bool = False                            # diabetes / pre-diabetes
+    high_chol: bool = False                           # diagnosed high cholesterol
+    hypertension: bool = False                        # hypertension history
+    clot: bool = False                                # previous blood clot
+    thyroid: bool = False                             # thyroid disorder
+    family_history: bool = False                      # family history of heart disease
+    # diet questionnaire (F61-F65) — frequency words, mapped to 0-1 server-side
+    sat_fat_freq: str = Field(default="sometimes", pattern="^(never|rarely|sometimes|often|very_often)$")
+    sugar_freq: str = Field(default="sometimes", pattern="^(never|rarely|sometimes|often|very_often)$")
+    veg_freq: str = Field(default="sometimes", pattern="^(never|rarely|sometimes|often|very_often)$")
+    alcohol_freq: str = Field(default="rarely", pattern="^(never|rarely|sometimes|often|very_often)$")
+    omega3_freq: str = Field(default="sometimes", pattern="^(never|rarely|sometimes|often|very_often)$")
+    # smoking (F66, F67) — computed from status + consumption
+    smoke_status: str = Field(default="never", pattern="^(never|current|former)$")
+    cigarettes_per_day: float = Field(default=0, ge=0, le=80)
+    years_smoked: float = Field(default=0, ge=0, le=70)
+    # optional known baselines (personalize the simulation)
+    baseline_resting_hr: Optional[float] = Field(default=None, ge=35, le=130)
+    baseline_hrv_rmssd: Optional[float] = Field(default=None, ge=8, le=180)
+    baseline_systolic: Optional[float] = Field(default=None, ge=80, le=220)
+    baseline_diastolic: Optional[float] = Field(default=None, ge=50, le=140)
+    baseline_total_cholesterol: Optional[float] = Field(default=None, ge=100, le=400)
+    baseline_hdl: Optional[float] = Field(default=None, ge=20, le=120)
+    baseline_triglycerides: Optional[float] = Field(default=None, ge=40, le=600)
+
+
+# frequency words -> normalized 0-1 factor values
+FREQ_MAP = {"never": 0.05, "rarely": 0.25, "sometimes": 0.5, "often": 0.75, "very_often": 0.95}
+# ethnicity categories -> population risk background (F52)
+ETHNICITY_MAP = {
+    "european": 0.30, "east_asian": 0.30, "south_asian": 0.55,
+    "african": 0.45, "hispanic": 0.35, "middle_eastern": 0.40, "other": 0.30,
+}
+
+
+def smoking_scores(status: str, cigs_per_day: float, years: float) -> tuple[float, float]:
+    """Return (F66 intensity 0-1, F67 pack-years). Pack-years = cigs×years/20."""
+    cigs = max(0.0, float(cigs_per_day))
+    years = max(0.0, float(years))
+    pack_years = min(cigs * years / 20.0, 80.0)
+    if status != "current":
+        return 0.0, pack_years          # former smokers keep pack-year risk
+    if cigs <= 5:
+        intensity = 0.3
+    elif cigs <= 10:
+        intensity = 0.5
+    elif cigs <= 20:
+        intensity = 0.75
+    else:
+        intensity = 1.0
+    return intensity, pack_years
 
 
 # --------------------------------------------------------------------------- #
@@ -177,43 +205,68 @@ def profile_to_user_profile(p: Dict[str, Any]) -> UserProfile:
     whr = None
     if p.get("waist_cm") and p.get("hip_cm"):
         whr = round(p["waist_cm"] / p["hip_cm"], 3)
+    intensity, pack_years = smoking_scores(
+        p.get("smoke_status", "never"), p.get("cigarettes_per_day", 0), p.get("years_smoked", 0))
     preset = PRESET_PROFILES["typical"]
+
+    def base(name):
+        v = p.get(name)
+        return float(v) if v not in (None, "") else float(getattr(preset, name))
+
     return UserProfile(
         name=p.get("name", "Patient"),
         age=int(p["age"]), sex=p["sex"],
         height_cm=float(p["height_cm"]), weight_kg=float(p["weight_kg"]),
         waist_cm=p.get("waist_cm"), waist_hip_ratio=whr,
-        ethnicity_risk=float(p.get("ethnicity_risk", 0.3)),
-        smoker=bool(p.get("smoker")), diabetic=bool(p.get("diabetic")),
+        ethnicity_risk=ETHNICITY_MAP.get(p.get("ethnicity", "other"), 0.3),
+        smoker=(p.get("smoke_status") == "current"),
+        diabetic=bool(p.get("diabetic")),
         family_history=bool(p.get("family_history")),
-        chol_history=float(p.get("chol_history", 0.2)),
-        htn_history=float(p.get("htn_history", 0.1)),
-        clot_history=float(p.get("clot_history", 0.0)),
-        thyroid=float(p.get("thyroid", 0.05)),
-        smoking_intensity=float(p.get("smoking_intensity", 0.6)),
-        pack_years=float(p.get("pack_years", 12.0)),
-        sat_fat=float(p.get("sat_fat", 0.3)), sugar=float(p.get("sugar", 0.3)),
-        vegetables=float(p.get("vegetables", 0.6)), alcohol=float(p.get("alcohol", 0.2)),
-        omega3=float(p.get("omega3", 0.5)),
-        baseline_resting_hr=float(p.get("baseline_resting_hr", preset.baseline_resting_hr)),
-        baseline_hrv_rmssd=float(p.get("baseline_hrv_rmssd", preset.baseline_hrv_rmssd)),
-        baseline_systolic=float(p.get("baseline_systolic", preset.baseline_systolic)),
-        baseline_diastolic=float(p.get("baseline_diastolic", preset.baseline_diastolic)),
-        baseline_total_cholesterol=float(p.get("baseline_total_cholesterol", preset.baseline_total_cholesterol)),
-        baseline_hdl=float(p.get("baseline_hdl", preset.baseline_hdl)),
-        baseline_triglycerides=float(p.get("baseline_triglycerides", preset.baseline_triglycerides)),
+        # yes/no -> graded history factors
+        chol_history=0.85 if p.get("high_chol") else 0.05,
+        htn_history=0.85 if p.get("hypertension") else 0.05,
+        clot_history=0.90 if p.get("clot") else 0.0,
+        thyroid=0.80 if p.get("thyroid") else 0.03,
+        # frequency words -> normalized factors (protective ones inverted)
+        smoking_intensity=intensity,
+        pack_years=pack_years if pack_years > 0 else (12.0 if p.get("smoke_status") == "current" else 0.0),
+        sat_fat=FREQ_MAP[p.get("sat_fat_freq", "sometimes")],
+        sugar=FREQ_MAP[p.get("sugar_freq", "sometimes")],
+        vegetables=1 - FREQ_MAP[p.get("veg_freq", "sometimes")],
+        alcohol=FREQ_MAP[p.get("alcohol_freq", "rarely")],
+        omega3=1 - FREQ_MAP[p.get("omega3_freq", "sometimes")],
+        baseline_resting_hr=base("baseline_resting_hr"),
+        baseline_hrv_rmssd=base("baseline_hrv_rmssd"),
+        baseline_systolic=base("baseline_systolic"),
+        baseline_diastolic=base("baseline_diastolic"),
+        baseline_total_cholesterol=base("baseline_total_cholesterol"),
+        baseline_hdl=base("baseline_hdl"),
+        baseline_triglycerides=base("baseline_triglycerides"),
     )
 
 
 def run_twin_estimate(profile: Dict[str, Any], days: int = 60,
                       scenario: str = "stable", seed: int = 42) -> Dict[str, Any]:
     """Full engine run for the patient's profile -> JSON-safe result dict."""
+    import datetime as _dt
+
     user = profile_to_user_profile(profile)
     twin = BiomarkerTwin(user.to_dict())
     source = SimulatedWearableSource(user, scenario=scenario, seed=seed, lab_interval_days=None)
     for i, obs in enumerate(source.next_days(days)):
         twin.update(obs, day_index=i)
     s = twin.state
+
+    # cluster population scatter (same deterministic fit as the twin's assigner)
+    from src.biomarker_twin import BiomarkerClusterer, generate_cohort
+    cohort_X, cohort_cvd = generate_cohort(160, seed=7)
+    clusterer = BiomarkerClusterer().fit(cohort_X, cohort_cvd)
+    pts = clusterer.cohort_points_2d(cohort_X)
+    step = max(1, len(pts) // 90)  # subsample for payload size
+    scatter = [{"x": round(float(pts.iloc[i]["pc1"]), 2),
+                "y": round(float(pts.iloc[i]["pc2"]), 2),
+                "cluster": pts.iloc[i]["cluster"]} for i in range(0, len(pts), step)]
+
     trajectory = []
     for i, (_, cvd), row in zip(range(len(twin.risk_history)), twin.risk_history, twin.biomarker_history):
         trajectory.append({"day": i, "cvd": round(float(cvd), 4),
@@ -223,7 +276,17 @@ def run_twin_estimate(profile: Dict[str, Any], days: int = 60,
          "value": s.factors.get(fid), "reading": FACTORS[fid].direction}
         for fid in FACTOR_IDS
     ]
+    intensity, pack_years = smoking_scores(
+        profile.get("smoke_status", "never"),
+        profile.get("cigarettes_per_day", 0), profile.get("years_smoked", 0))
     return {
+        "patient": {
+            "name": user.name, "age": user.age, "sex": user.sex, "bmi": user.bmi,
+            "waist_hip_ratio": user.waist_hip_ratio,
+            "smoke_status": profile.get("smoke_status", "never"),
+            "pack_years": round(pack_years, 1),
+        },
+        "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="minutes"),
         "biomarkers": s.biomarkers,
         "derived": s.derived,
         "categories": s.categories,
@@ -231,7 +294,9 @@ def run_twin_estimate(profile: Dict[str, Any], days: int = 60,
         "cvd_score": s.cvd_score, "cvd_category": s.cvd_category,
         "ctr": s.ctr, "ctr_category": s.ctr_category,
         "pathways": s.pathway_risk,
-        "cluster": {"label": s.cluster["label"], "confidence": s.cluster["confidence"]},
+        "cluster": {"label": s.cluster["label"], "confidence": s.cluster["confidence"],
+                    "pc1": s.cluster.get("pc1"), "pc2": s.cluster.get("pc2"),
+                    "scatter": scatter},
         "trend": twin.trend,
         "baselines": twin.baseline_table(),
         "top_contributions": s.top_contributions,
@@ -241,6 +306,12 @@ def run_twin_estimate(profile: Dict[str, Any], days: int = 60,
         "factors": factors,
         "bmi": user.bmi,
         "scenario": scenario, "days": days,
+        # simulated demo stream (no physical sensors attached in this prototype)
+        "wearable_status": [
+            {"sensor": name, "status": "connected"}
+            for name in ("ECG", "PPG", "SpO2", "Blood Pressure", "NIR",
+                         "Temperature", "GSR", "Bioimpedance", "IMU")
+        ],
     }
 
 
