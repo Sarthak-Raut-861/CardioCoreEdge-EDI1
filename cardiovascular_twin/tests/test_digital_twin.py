@@ -78,13 +78,15 @@ class TestAlerts:
         upd = twin.assimilate({"nocturnal_spo2_pct": 89.0})
         assert any(a["code"] == "desaturation" for a in upd.alerts)
 
-    def test_healthy_days_no_alerts(self):
+    def test_healthy_days_no_serious_alerts(self):
         twin = DigitalTwin(PRESET_PROFILES["healthy"].to_dict())
         source = SimulatedWearableSource(PRESET_PROFILES["healthy"], seed=1)
         alerts = []
         for obs in source.next_days(15):
             alerts += twin.assimilate(obs, obs.get("labs")).alerts
-        assert alerts == []
+        # safety-relevant alert levels must stay silent for a healthy profile;
+        # info-level personal-baseline anomaly notes are acceptable by design
+        assert all(a["level"] == "info" and a["code"] == "anomaly_detected" for a in alerts)
 
 
 class TestPersistence:

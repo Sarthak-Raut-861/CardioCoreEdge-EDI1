@@ -56,6 +56,7 @@ class CompositeResult:
     coverage: float                  # fraction of expected factors available
     n_factors: int
     breakdown: List[Factor]          # sorted by weighted contribution (desc)
+    multipliers: Optional[Dict[str, float]] = None  # adaptive multipliers used
 
     def top(self, n: int = 5) -> List[Factor]:
         return self.breakdown[:n]
@@ -66,6 +67,7 @@ class CompositeResult:
             "coverage": self.coverage,
             "n_factors": self.n_factors,
             "breakdown": [f.to_dict() for f in self.breakdown],
+            "multipliers": self.multipliers,
         }
 
 
@@ -242,17 +244,30 @@ class FactorEngine:
     # Composite
     # ------------------------------------------------------------------ #
     @staticmethod
-    def composite(factors: Sequence[Factor]) -> CompositeResult:
-        """Weighted mean over *available* factors; unavailable ones excluded."""
+    def composite(factors: Sequence[Factor],
+                  multipliers: Optional[Mapping[str, float]] = None) -> CompositeResult:
+        """Weighted mean over *available* factors; unavailable ones excluded.
+
+        ``multipliers`` optionally rescale per-factor weights (used by the
+        twin's adaptive learning layer); keys without a multiplier use 1.0.
+        """
         available = [f for f in factors if f.value is not None]
         total_weight_expected = sum(f.weight for f in factors)
         if not available or total_weight_expected == 0:
             return CompositeResult(0.0, 0.0, 0, list(factors))
-        total_weight = sum(f.weight for f in available)
-        score = sum(f.weight * f.score for f in available) / total_weight
+        used: Dict[str, float] = {}
+        num = den = 0.0
+        for f in available:
+            m = float(multipliers.get(f.key, 1.0)) if multipliers else 1.0
+            used[f.key] = round(m, 3)
+            w_eff = f.weight * m
+            num += w_eff * f.score
+            den += w_eff
+        score = num / den if den > 0 else 0.0
         breakdown = sorted(available, key=lambda f: f.weight * f.score, reverse=True)
-        coverage = round(total_weight / total_weight_expected, 3)
-        return CompositeResult(round(score, 3), coverage, len(available), breakdown)
+        coverage = round(sum(f.weight for f in available) / total_weight_expected, 3)
+        mults_out = used if multipliers is not None else None
+        return CompositeResult(round(score, 3), coverage, len(available), breakdown, mults_out)
 
     # ------------------------------------------------------------------ #
     @classmethod

@@ -60,6 +60,10 @@ def final_report(twin: DigitalTwin, history: pd.DataFrame) -> None:
     print(f"Days monitored : {twin.days_seen}")
     print(f"Risk score     : {twin.risk_score:.2f}  ({twin.risk_category})")
     print(f"Trend          : {twin.risk_trend()}")
+    if twin.adaptive:
+        ls = twin.learning_summary()
+        print(f"Self-learning  : {ls['warm_baselines']}/{ls['channels_tracked']} personalized baselines | "
+              f"95% CI [{ls['ci95'][0]:.3f}, {ls['ci95'][1]:.3f}] | precision gain {ls['precision_gain_pct']:+.1f}%")
 
     composite = twin._compute_risk()
     explainer = RiskExplainer()

@@ -30,6 +30,7 @@ from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 
+from .adaptive_engine import AdaptiveWeightLearner, ConfidenceModel, PersonalBaselineTracker
 from .factor_engine import CompositeResult, Factor, FactorEngine
 from .lipid_calculator import LipidCalculator
 
@@ -74,6 +75,8 @@ class TwinUpdate:
     composite: Optional[CompositeResult] = None
     alerts: List[Dict[str, str]] = field(default_factory=list)
     trend: Optional[str] = None
+    ci95: Optional[Tuple[float, float]] = None
+    multipliers: Optional[Dict[str, float]] = None
 
     def to_dict(self) -> Dict:
         return {
@@ -83,6 +86,8 @@ class TwinUpdate:
             "category": self.category,
             "alerts": self.alerts,
             "trend": self.trend,
+            "ci95": self.ci95,
+            "multipliers": self.multipliers,
             "top_factors": [f.to_dict() for f in (self.composite.top(5) if self.composite else [])],
         }
 
@@ -107,6 +112,7 @@ class DigitalTwin:
         profile: Mapping,
         learning_rate: float = 0.15,
         history_len: int = 90,
+        adaptive: bool = True,
     ) -> None:
         if not 0.0 < learning_rate <= 1.0:
             raise ValueError("learning_rate must be in (0, 1]")
@@ -119,6 +125,12 @@ class DigitalTwin:
         self.days_seen = 0
         self.risk_history: Deque[Tuple[int, float]] = deque(maxlen=history_len)
         self.alerts_raised: List[Dict[str, str]] = []
+
+        # --- self-learning layer ---------------------------------------- #
+        self.adaptive = adaptive
+        self.baselines = PersonalBaselineTracker()
+        self.weight_learner = AdaptiveWeightLearner()
+        self.confidence = ConfidenceModel()
 
         # optional ML model hook (see explainability.RiskExplainer)
         self.model = None
@@ -138,6 +150,7 @@ class DigitalTwin:
 
     def assimilate(self, obs: Mapping[str, float], labs: Optional[Mapping[str, float]] = None) -> TwinUpdate:
         """Ingest one day of aggregated observations; returns the new twin update."""
+        zscores = self.baselines.update(obs) if self.adaptive else {}
         self._assimilate_state(obs)
         if labs:
             self.labs = {k: float(v) for k, v in labs.items()}
@@ -145,11 +158,31 @@ class DigitalTwin:
 
         composite = self._compute_risk()
         self.risk_history.append((self.days_seen - 1, composite.score))
+
+        multipliers_used: Optional[Dict[str, float]] = None
+        ci: Optional[Tuple[float, float]] = None
+        if self.adaptive:
+            factor_scores = {f.key: f.score for f in composite.breakdown if f.value is not None}
+            multipliers_used = self.weight_learner.observe(factor_scores, composite.score)
+            ci = self.confidence.update(composite.score)
+
         alerts = self._evaluate_alerts(obs)
+        # personal-baseline anomaly detection (learned norms, not population)
+        if self.adaptive:
+            warm_anoms = [k for k in self.baselines.anomalies(zscores) if self.baselines.is_warm(k)]
+            if warm_anoms:
+                worst = max(warm_anoms, key=lambda k: abs(zscores[k]))
+                alerts.append({
+                    "level": "info",
+                    "code": "anomaly_detected",
+                    "message": (f"Personal-baseline anomaly: {worst} at {self.state.get(worst)} "
+                                f"({zscores[worst]:+.1f} sigma vs your learned normal)."),
+                    "day": str(obs.get("date", obs.get("day_index", ""))),
+                })
         self.alerts_raised.extend(alerts)
         trend = self.risk_trend()
 
-        update = TwinUpdate(
+        return TwinUpdate(
             day_index=self.days_seen - 1,
             date=obs.get("date"),
             risk_score=composite.score,
@@ -157,8 +190,9 @@ class DigitalTwin:
             composite=composite,
             alerts=alerts,
             trend=trend,
+            ci95=ci,
+            multipliers=multipliers_used,
         )
-        return update
 
     # ------------------------------------------------------------------ #
     # Risk
@@ -168,7 +202,8 @@ class DigitalTwin:
         prior = FactorEngine.composite(demo)
         wear = FactorEngine.evaluate_wearables(self.state)
         lab = FactorEngine.evaluate_labs(self.labs)
-        current = FactorEngine.composite(wear + lab)
+        multipliers = self.weight_learner.active_multipliers() if self.adaptive else None
+        current = FactorEngine.composite(wear + lab, multipliers=multipliers)
 
         if current.n_factors == 0:
             blended = prior.score
@@ -177,7 +212,8 @@ class DigitalTwin:
 
         # combined breakdown for downstream explanation
         combined = sorted(demo + wear + lab, key=lambda f: f.weight * (f.score if f.value is not None else 0.0), reverse=True)
-        return CompositeResult(round(blended, 3), current.coverage, current.n_factors, combined)
+        return CompositeResult(round(blended, 3), current.coverage, current.n_factors, combined,
+                               multipliers=current.multipliers)
 
     @property
     def risk_score(self) -> float:
@@ -280,11 +316,17 @@ class DigitalTwin:
             "profile": self.profile,
             "learning_rate": self.learning_rate,
             "history_len": self.history_len,
+            "adaptive": self.adaptive,
             "state": self.state,
             "labs": self.labs,
             "days_seen": self.days_seen,
             "risk_history": list(self.risk_history),
             "alerts_raised": self.alerts_raised[-50:],
+            "adaptive_state": {
+                "baselines": self.baselines.to_dict(),
+                "weight_learner": self.weight_learner.to_dict(),
+                "confidence": self.confidence.to_dict(),
+            } if self.adaptive else None,
         }
 
     @classmethod
@@ -293,12 +335,18 @@ class DigitalTwin:
             profile=data["profile"],
             learning_rate=data.get("learning_rate", 0.15),
             history_len=data.get("history_len", 90),
+            adaptive=data.get("adaptive", True),
         )
         twin.state.update({k: v for k, v in data.get("state", {}).items() if k in twin.state})
         twin.labs = data.get("labs")
         twin.days_seen = int(data.get("days_seen", 0))
         twin.risk_history.extend((int(d), float(r)) for d, r in data.get("risk_history", []))
         twin.alerts_raised = list(data.get("alerts_raised", []))
+        ad = data.get("adaptive_state")
+        if ad and twin.adaptive:
+            twin.baselines = PersonalBaselineTracker.from_dict(ad.get("baselines", {}))
+            twin.weight_learner = AdaptiveWeightLearner.from_dict(ad.get("weight_learner", {}))
+            twin.confidence = ConfidenceModel.from_dict(ad.get("confidence", {}))
         return twin
 
     # ------------------------------------------------------------------ #
@@ -306,3 +354,21 @@ class DigitalTwin:
         if not self.labs:
             return None
         return LipidCalculator.analyze(dict(self.labs))
+
+    # ------------------------------------------------------------------ #
+    # Learning summary
+    # ------------------------------------------------------------------ #
+    def learning_summary(self) -> Dict:
+        """Snapshot of the self-learning layer for dashboards/reports."""
+        if not self.adaptive:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "days_seen": self.days_seen,
+            "warm_baselines": self.baselines.warm_count(),
+            "channels_tracked": len(self.baselines.stats),
+            "ci95": self.confidence.ci95(self.risk_score),
+            "ci_width": self.confidence.width,
+            "precision_gain_pct": self.confidence.precision_pct(),
+            "top_learned_weights": self.weight_learner.summary(top=5),
+        }
