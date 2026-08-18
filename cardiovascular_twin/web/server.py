@@ -54,29 +54,51 @@ app = FastAPI(title="CardioCore Patient Portal", version="1.0")
 # --------------------------------------------------------------------------- #
 # Storage
 # --------------------------------------------------------------------------- #
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
+    created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS tokens(
+    token TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+    expires_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS profiles(
+    user_id INTEGER PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at REAL NOT NULL);
+"""
+
+
 def db() -> sqlite3.Connection:
+    """Open a connection; the schema check is idempotent and *self-healing*
+    (even if the DB file is deleted at runtime, the next request rebuilds it)."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
     return conn
 
 
 def init_db() -> None:
     with db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
-            created_at REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS tokens(
-            token TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
-            expires_at REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS profiles(
-            user_id INTEGER PRIMARY KEY,
-            data TEXT NOT NULL,
-            updated_at REAL NOT NULL);
-        """)
+        pass
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(request, exc: Exception):
+    """Surface unexpected errors to the client instead of an opaque 500."""
+    import traceback
+    traceback.print_exc()
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {exc}"})
+
+
+@app.get("/api/health")
+def health():
+    with db() as conn:
+        n_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+    return {"ok": True, "users": int(n_users)}
 
 
 def hash_password(password: str, salt: str) -> str:

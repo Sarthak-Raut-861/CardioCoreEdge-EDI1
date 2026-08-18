@@ -7,9 +7,16 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const app = $("#app");
 
+/* storage safe against sandboxed iframes / blocked third-party storage */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* in-memory only */ } },
+  del(k) { try { localStorage.removeItem(k); } catch (e) {} },
+};
+
 const state = {
-  token: localStorage.getItem("cc_token") || null,
-  user: JSON.parse(localStorage.getItem("cc_user") || "null"),
+  token: store.get("cc_token") || null,
+  user: JSON.parse(store.get("cc_user") || "null"),
   profile: null,
   result: null,
   scenario: "stable",
@@ -39,7 +46,11 @@ async function api(path, opts = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401) doLogout(true);
+    // a dead session only logs out authenticated calls — never the login form itself
+    if (res.status === 401 && state.token && !path.startsWith("/api/auth/")) {
+      doLogout(true);
+      toast(data.detail || "Session expired — please sign in again", true);
+    }
     throw new Error(data.detail || "Request failed");
   }
   return data;
@@ -48,13 +59,18 @@ async function api(path, opts = {}) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 function nav(hash) { location.hash = hash; }
+function navOrRoute(hash) {
+  // navigate; if the hash already equals the target, hashchange won't fire — route manually
+  if (location.hash === hash) route();
+  else nav(hash);
+}
 function doLogout(silent) {
   if (state.token) api("/api/auth/logout", { method: "POST" }).catch(() => {});
-  localStorage.removeItem("cc_token");
-  localStorage.removeItem("cc_user");
+  store.del("cc_token");
+  store.del("cc_user");
   state.token = null; state.user = null; state.profile = null; state.result = null;
   if (!silent) toast("Logged out");
-  nav("#/auth");
+  navOrRoute("#/auth");
 }
 
 const CAT_COLORS = {
@@ -153,10 +169,10 @@ function renderAuth() {
       const res = await api(mode === "login" ? "/api/auth/login" : "/api/auth/signup", { method: "POST", body: payload });
       state.token = res.token;
       state.user = { name: res.name, email: res.email };
-      localStorage.setItem("cc_token", res.token);
-      localStorage.setItem("cc_user", JSON.stringify(state.user));
+      store.set("cc_token", res.token);
+      store.set("cc_user", JSON.stringify(state.user));
       toast(mode === "login" ? `Welcome back, ${res.name.split(" ")[0]}!` : "Account created — let's set up your twin");
-      nav(res.has_profile ? "#/dashboard" : "#/onboarding");
+      navOrRoute(res.has_profile ? "#/dashboard" : "#/onboarding");
     } catch (err) { toast(err.message, true); }
   };
 }
@@ -349,7 +365,7 @@ function renderWizard() {
       state.user = { ...state.user, has_profile: true };
       toast("Profile saved — running your twin");
       state._step = 0;
-      nav("#/dashboard");
+      navOrRoute("#/dashboard");
     } catch (err) {
       toast(err.message, true);
       btn.disabled = false; btn.textContent = "Create my twin →";
