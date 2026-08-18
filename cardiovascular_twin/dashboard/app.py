@@ -1,22 +1,21 @@
 """
-dashboard/app.py — CardioCore digital twin dashboard (Streamlit)
+dashboard/app.py — CardioCore Digital Twin dashboard (Streamlit)
 ================================================================
-Numbers-first dashboard for the self-learning cardiovascular twin.
+Implements the documentation's Chapter 11 dashboard design:
 
-Run:
-    streamlit run dashboard/app.py
+ 1. Patient header            7. Baseline comparison (z-scores)
+ 2. Overall risk gauge + CTR  8. Time-series trends
+ 3. Lipid profile table       9. Graded alerts
+ 4. Inflammatory markers     10. AI explanation (top-5 factors per biomarker)
+ 5. 6-axis radar chart       11. Disclaimer
+ 6. Cluster assignment (K=4, PCA, confidence)
+ + full 72-factor table (all normalized values + weights + directions)
+ + wearable twin tab (EWMA factor engine + adaptive learning)
 
-Tabs
-----
-1. Overview    – headline scores: risk, category, trend, 95% CI, precision gain
-2. Factors     – every factor with value, 0-1 score, weight, learned multiplier,
-                 effective weight and contribution share
-3. Learning    – personalized baselines, adaptive weight evolution, CI shrinkage
-4. Trajectory  – risk history + raw physiological channels
-5. Phenotypes  – daily-state clustering (KMeans + PCA)
-6. ML model    – trained risk-model probability for the current twin state
+Run:  streamlit run dashboard/app.py
 
-Research/educational prototype – NOT a medical device.
+RESEARCH PROTOTYPE — all biomarker values are AI estimates. Not for clinical
+diagnosis. Confirm findings with laboratory blood tests.
 """
 
 from __future__ import annotations
@@ -33,293 +32,363 @@ import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from src.clustering import PhenotypeClusterer  # noqa: E402
+from src.biomarker_twin import BiomarkerClusterer, BiomarkerTwin, generate_cohort  # noqa: E402
 from src.data_simulator import PRESET_PROFILES, SimulatedWearableSource, simulate_history  # noqa: E402
 from src.digital_twin import DISCLAIMER, DigitalTwin  # noqa: E402
 from src.explainability import RiskExplainer  # noqa: E402
+from src.factors72 import FACTORS, FACTOR_IDS  # noqa: E402
 
 st.set_page_config(page_title="CardioCore Digital Twin", page_icon="❤️", layout="wide")
+
+# §11.2 color coding
+GREEN, YELLOW, ORANGE, RED, GRAY = "#2ecc71", "#f1c40f", "#e67e22", "#e74c3c", "#95a5a6"
+CATEGORY_COLORS = {
+    "Desirable": GREEN, "Borderline High": YELLOW, "High": ORANGE, "Very High": RED,
+    "Optimal": GREEN, "Near Optimal": GREEN, "Borderline": YELLOW,
+    "Protective": GREEN, "Normal": GREEN, "Low (Risk)": RED,
+    "Low CV Risk": GREEN, "Moderate CV Risk": YELLOW, "High CV Risk": ORANGE, "Acute Infection": RED,
+    "Mild Elevation": YELLOW, "Mild": YELLOW, "Moderate": ORANGE, "High Risk": RED,
+    "Low": GREEN, "Moderate ": YELLOW, "Very High": RED,
+}
+
+
+def color_for(category: str) -> str:
+    if not category:
+        return GRAY
+    if category in CATEGORY_COLORS:
+        return CATEGORY_COLORS[category]
+    if category.startswith("High"):
+        return ORANGE
+    if category.startswith("Very High"):
+        return RED
+    if category.startswith("Moderate"):
+        return YELLOW
+    return GRAY
+
+
+BIOMARKER_INFO = {  # unit + normal range text (doc §6.10)
+    "TC": ("mg/dL", "Desirable < 200"),
+    "HDL": ("mg/dL", "Protective ≥ 60"),
+    "LDL": ("mg/dL", "Optimal < 100"),
+    "TG": ("mg/dL", "Normal < 150"),
+    "CRP": ("mg/L", "Low risk < 1.0"),
+    "DD": ("mg/L", "Normal < 0.5"),
+}
+NAMES = {"TC": "Total Cholesterol", "HDL": "HDL Cholesterol", "LDL": "LDL Cholesterol",
+         "TG": "Triglycerides", "CRP": "C-Reactive Protein", "DD": "D-Dimer"}
 
 
 # --------------------------------------------------------------------------- #
 # Simulation (cached)
 # --------------------------------------------------------------------------- #
-@st.cache_data(show_spinner="Running digital-twin simulation ...")
-def run_twin(profile_name: str, scenario: str, days: int, seed: int, lr: float):
+@st.cache_data(show_spinner="Running 72-factor digital-twin simulation ...")
+def run_twin(profile_name: str, scenario: str, days: int, seed: int):
     profile = PRESET_PROFILES[profile_name]
     source = SimulatedWearableSource(profile, scenario=scenario, seed=seed, lab_interval_days=90)
-    twin = DigitalTwin(profile.to_dict(), learning_rate=lr)
-    updates = [twin.assimilate(obs, obs.get("labs")) for obs in source.next_days(days)]
+    twin = BiomarkerTwin(profile.to_dict())
+    wearable = DigitalTwin(profile.to_dict(), learning_rate=0.15)
+    for i, obs in enumerate(source.next_days(days)):
+        twin.update(obs, day_index=i)
+        wearable.assimilate(obs, obs.get("labs"))
     history = simulate_history(days, profile, scenario=scenario, seed=seed, lab_interval_days=90)
-    return twin.snapshot(), [u.to_dict() for u in updates], history
-
-
-@st.cache_resource(show_spinner=False)
-def load_model_bundle():
-    path = ROOT / "models" / "risk_model.joblib"
-    if not path.exists():
-        return None, None
-    from src.model_training import load_artifact
-
-    artifact = load_artifact(path)
-    metrics = None
-    mpath = ROOT / "models" / "metrics.json"
-    if mpath.exists():
-        import json
-
-        metrics = json.loads(mpath.read_text())
-    return artifact, metrics
+    bio_df = pd.DataFrame(list(twin.biomarker_history))
+    bio_df["CVD"] = [r for _, r in twin.risk_history]
+    factor_df = pd.DataFrame(list(twin.factor_history))
+    return twin.snapshot(), wearable.snapshot(), bio_df, factor_df, history
 
 
 # --------------------------------------------------------------------------- #
-# Sidebar
+# Sidebar (patient header + controls)
 # --------------------------------------------------------------------------- #
-st.sidebar.title("❤️ CardioCore")
-st.sidebar.caption("Self-learning cardiovascular digital twin")
+st.sidebar.title("❤️ CardioCore Digital Twin")
+st.sidebar.caption("Continuous · Personalized · Explainable · Non-Invasive")
 
-st.sidebar.subheader("Simulation")
-profile_name = st.sidebar.selectbox("User profile", list(PRESET_PROFILES), index=1)
+profile_name = st.sidebar.selectbox("User profile", list(PRESET_PROFILES), index=2)
 scenario = st.sidebar.selectbox("Scenario", ["stable", "improving", "declining"], index=2)
 days = st.sidebar.slider("Days monitored", 30, 180, 60, 10)
 seed = st.sidebar.number_input("Random seed", 0, 999, 42)
-lr = st.sidebar.slider("Twin learning rate (EWMA)", 0.05, 0.4, 0.15, 0.05)
 
-snap, updates, history = run_twin(profile_name, scenario, int(days), int(seed), float(lr))
-twin = DigitalTwin.from_dict(snap)
-
-st.sidebar.success(f"{days} days simulated · {twin.days_seen} assimilated")
-st.sidebar.markdown(f"<small>{DISCLAIMER}</small>", unsafe_allow_html=True)
-
-# --------------------------------------------------------------------------- #
-# Header
-# --------------------------------------------------------------------------- #
+snap, wear_snap, bio_df, factor_df, history = run_twin(profile_name, scenario, int(days), int(seed))
+twin = BiomarkerTwin.__new__(BiomarkerTwin)   # lightweight view over snapshot
+state = snap["state"]
 profile = PRESET_PROFILES[profile_name]
-st.title(f"Digital Twin — {profile.name}")
-st.caption(f"age {profile.age} · {profile.sex} · BMI {profile.bmi} · smoker {profile.smoker} · "
-           f"diabetic {profile.diabetic} · family history {profile.family_history} · scenario: {scenario}")
 
-tab_overview, tab_factors, tab_learning, tab_traj, tab_pheno, tab_model = st.tabs(
-    ["📊 Overview", "🧮 Factors", "🧠 Learning", "📈 Trajectory", "🧬 Phenotypes", "🤖 ML model"]
-)
+st.sidebar.success(f"{days} days simulated · {snap['days_seen']} readings assimilated")
+st.sidebar.warning("■ RESEARCH PROTOTYPE — biomarker values are AI estimates. Confirm with lab blood tests.")
 
-# --------------------------------------------------------------------------- #
-# 1) Overview
-# --------------------------------------------------------------------------- #
-with tab_overview:
-    learning = twin.learning_summary()
-    last = updates[-1]
-    ci = last.get("ci95") or (None, None)
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Risk score (0-100)", f"{twin.risk_score * 100:.1f}",
-                f"95% CI {ci[0] * 100:.0f}–{ci[1] * 100:.0f}" if ci[0] is not None else None)
-    col2.metric("Category", twin.risk_category, twin.risk_trend())
-    col3.metric("Precision gain (CI shrinkage)", f"{learning.get('precision_gain_pct', 0):+.1f}%",
-                f"CI width ±{learning.get('ci_width', 0) / 2 * 100:.1f} pts")
-    col4.metric("Personalized baselines", f"{learning.get('warm_baselines', 0)}/{learning.get('channels_tracked', 0)}",
-                f"after {twin.days_seen} days")
+# ---- 1) Patient header ------------------------------------------------------ #
+st.title(f"❤️ {profile.name} — Cardiovascular Digital Twin")
+st.caption(f"Age {profile.age} · {profile.sex.upper()} · BMI {profile.bmi} · smoker {profile.smoker} · "
+           f"diabetic {profile.diabetic} · family history {profile.family_history} · scenario: **{scenario}** · "
+           f"twin status: **ACTIVE** · {snap['days_seen']} readings")
 
-    st.subheader("Final numbers")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Days monitored", twin.days_seen)
-    m2.metric("Factors evaluated", twin._compute_risk().n_factors)
-    m3.metric("Data coverage", f"{twin._compute_risk().coverage * 100:.0f}%")
-    m4.metric("Alerts raised", len(twin.alerts_raised))
-
-    # top drivers table
-    st.subheader("Top risk drivers (weighted contribution)")
-    comp = twin._compute_risk()
-    table = RiskExplainer.explain_composite(comp)
-    mults = comp.multipliers or {}
-    table["multiplier"] = table["factor"].map(lambda n: None)
-    name_to_mult = {f.name: mults.get(f.key) for f in comp.breakdown}
-    table["multiplier"] = table["factor"].map(name_to_mult)
-    st.dataframe(table.head(12), use_container_width=True, height=420)
-
-    st.subheader("Alerts")
-    if twin.alerts_raised:
-        alerts_df = pd.DataFrame(twin.alerts_raised[-15:])
-        st.dataframe(alerts_df[["day", "level", "code", "message"]], use_container_width=True)
-    else:
-        st.success("No alerts raised during the monitored period.")
-
-    st.info(RiskExplainer.narrative(comp))
+tabs = st.tabs(["📊 Overview", "🧬 Lipids & Biomarkers", "🔢 72 Factors", "🧠 Baselines",
+                "🧭 Cluster", "📈 Trends", "🚨 Alerts", "💬 AI Explanation", "⌚ Wearable Twin"])
 
 # --------------------------------------------------------------------------- #
-# 2) Factors
+# 2) Overview: gauge + CTR + radar
 # --------------------------------------------------------------------------- #
-with tab_factors:
-    st.subheader("All factors — full calculation table")
-    comp = twin._compute_risk()
-    mults = comp.multipliers or {}
-    rows = []
-    total_contrib = sum(f.weight * mults.get(f.key, 1.0) * f.score for f in comp.breakdown if f.value is not None) or 1.0
-    for f in comp.breakdown:
-        m = mults.get(f.key, 1.0)
-        eff_w = f.weight * m
-        contrib = eff_w * f.score
-        rows.append({
-            "factor": f.name, "key": f.key, "modality": f.modality,
-            "value": f.value, "score (0-1)": f.score, "base weight": f.weight,
-            "learned multiplier": m, "effective weight": round(eff_w, 3),
-            "contribution": round(contrib, 4), "share %": round(100 * contrib / total_contrib, 1),
-            "reference": f.reference,
-        })
-    fdf = pd.DataFrame(rows)
-    modality_filter = st.multiselect("Filter by modality", ["wearable", "lab", "demographic"],
-                                     default=["wearable", "lab", "demographic"])
-    fdf_view = fdf[fdf["modality"].isin(modality_filter)] if modality_filter else fdf
-    st.caption(f"Showing {len(fdf_view)} factors · composite risk = Σ(effective weight × score) / Σ(effective weight) "
-               f"= **{comp.score:.3f}** (wearable/lab part), blended with demographic prior → **{twin.risk_score:.3f}**")
-    st.dataframe(fdf_view, use_container_width=True, height=520)
+with tabs[0]:
+    b = state["biomarkers"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("CVD Risk Score", f"{state['cvd_score'] * 100:.0f} / 100", state["cvd_category"])
+    c2.metric("Trend (14d vs prior 14d)", snap["trend"] or "—")
+    c3.metric("Coronary Thrombosis Risk", f"{state['ctr']:.2f}", state["ctr_category"])
+    c4.metric("Risk Cluster", state["cluster"]["label"], f"conf {state['cluster']['confidence'] * 100:.0f}%")
 
-    st.subheader("Contribution shares (top 15)")
-    top = fdf.nlargest(15, "contribution").sort_values("contribution")
-    fig = go.Figure(go.Bar(
-        x=top["contribution"], y=top["factor"], orientation="h",
-        text=top["share %"].map(lambda v: f"{v:.1f}%"), textposition="outside",
-        marker_color=np.where(top["score (0-1)"] >= 0.5, "#d62728", "#2ca02c"),
-    ))
-    fig.update_layout(height=460, margin=dict(l=10, r=40, t=10, b=10), xaxis_title="weighted contribution")
-    st.plotly_chart(fig, use_container_width=True)
-
-# --------------------------------------------------------------------------- #
-# 3) Learning
-# --------------------------------------------------------------------------- #
-with tab_learning:
-    st.subheader("🧠 How the twin teaches itself")
-    st.markdown(
-        "1. **Personal baselines** — after a 14-day warm-up, population norms are replaced by *your own* "
-        "learned normal values (Welford online statistics), with 95% CIs.\n"
-        "2. **Adaptive weights (Hedge online learning)** — every day, factors that correctly anticipated the "
-        "next risk movement are up-weighted; noisy ones down-weighted (bounded 0.5–2.0×).\n"
-        "3. **Precision growth** — the risk estimate's confidence interval shrinks as evidence accumulates."
-    )
-    learning = twin.learning_summary()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Days learned from", twin.days_seen)
-    c2.metric("Warm personal baselines", f"{learning.get('warm_baselines', 0)}/{learning.get('channels_tracked', 0)}")
-    c3.metric("CI width now", f"±{learning.get('ci_width', 0) / 2 * 100:.1f} pts",
-              f"{learning.get('precision_gain_pct', 0):+.1f}% vs early days")
-
-    st.subheader("Personalized baselines (learned norms)")
-    base_rows = twin.baselines.table(list(twin.state.keys()))
-    for r in base_rows:  # annotate z of current state value
-        cur = twin.state.get(r["channel"])
-        r["current (EWMA state)"] = cur
-        dq = twin.baselines.recent.get(r["channel"])
-        if dq and len(dq) >= 2 and cur is not None:
-            arr = np.asarray(dq)
-            r["z_current"] = round((cur - arr.mean()) / (arr.std(ddof=1) or 1e-9), 2)
-    bdf = pd.DataFrame(base_rows)
-    st.dataframe(bdf, use_container_width=True, height=420)
-
-    st.subheader("Adaptive factor weights (top learned)")
-    wdf = pd.DataFrame(twin.weight_learner.summary(top=8))
-    if not wdf.empty:
-        st.dataframe(wdf, use_container_width=True)
-        st.caption("`multiplier` = hedge × stability · `hit_rate` = how often the factor's daily move "
-                   "anticipated the composite's next move · multiplier activates after 10 observations")
-
-    st.subheader("Precision growth — CI width over days")
-    if twin.confidence.history:
-        ch = twin.confidence.history
-        fig = go.Figure(go.Scatter(x=[d for d, _ in ch], y=[w * 100 for _, w in ch],
-                                   mode="lines", fill="tozeroy", line=dict(color="#1f77b4")))
-        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                          xaxis_title="day", yaxis_title="95% CI width (risk points ×100)")
+    gauge_col, radar_col = st.columns([1, 1])
+    with gauge_col:
+        st.subheader("Overall CVD Risk (0-100)")
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number", value=state["cvd_score"] * 100,
+            number={"suffix": " / 100"},
+            gauge={"axis": {"range": [0, 100]},
+                   "bar": {"color": color_for(state["cvd_category"])},
+                   "steps": [
+                       {"range": [0, 25], "color": "#d5f5e3"},
+                       {"range": [25, 50], "color": "#fdebd0"},
+                       {"range": [50, 75], "color": "#fad7a0"},
+                       {"range": [75, 100], "color": "#f5b7b1"}],
+                   "threshold": {"line": {"color": RED, "width": 3},
+                                 "thickness": 0.9, "value": state["cvd_score"] * 100}}))
+        fig.update_layout(height=280, margin=dict(l=25, r=25, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
+        st.subheader("Pathway Risk Scores")
+        pw = state["pathway_risk"]
+        pw_df = pd.DataFrame({"pathway": list(pw.keys()),
+                              "risk (0-1)": list(pw.values())})
+        pw_df["color"] = pw_df["risk (0-1)"].map(lambda v: RED if v > .66 else (ORANGE if v > .33 else GREEN))
+        figp = go.Figure(go.Bar(x=pw_df["risk (0-1)"], y=pw_df["pathway"], orientation="h",
+                                marker_color=pw_df["color"], text=pw_df["risk (0-1)"], textposition="outside"))
+        figp.update_layout(height=260, margin=dict(l=10, r=40, t=10, b=10), xaxis_range=[0, 1])
+        st.plotly_chart(figp, use_container_width=True)
+
+    with radar_col:
+        st.subheader("6-Axis Biomarker Risk Radar")
+        def risk_norm(k):
+            v = b[k]
+            return {"TC": (v - 150) / 170, "LDL": (v - 30) / 270, "HDL": 1 - (v - 20) / 60,
+                    "TG": (v - 80) / 420, "CRP": (v - 0.2) / 9.8, "DD": (v - 0.1) / 2.9}[k]
+        axes = ["TC", "LDL", "HDL", "TG", "CRP", "DD"]
+        vals = [max(0.0, min(1.0, risk_norm(k))) for k in axes]
+        fig = go.Figure(go.Scatterpolar(
+            r=vals + [vals[0]], theta=axes + [axes[0]], fill="toself",
+            line=dict(color="#e74c3c"), name="risk"))
+        fig.update_layout(polar=dict(radialaxis=dict(range=[0, 1], showticklabels=True)),
+                          height=380, margin=dict(l=60, r=60, t=40, b=40))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Each axis = biomarker risk-normalized to 0 (optimal) → 1 (worst). Larger area = higher risk.")
+
 # --------------------------------------------------------------------------- #
-# 4) Trajectory
+# 3) + 4) Lipid profile & inflammatory markers tables
 # --------------------------------------------------------------------------- #
-with tab_traj:
-    st.subheader("Composite risk trajectory")
-    rh = pd.DataFrame(twin.risk_history, columns=["day", "risk"])
+with tabs[1]:
+    st.subheader("Lipid Profile (AI-estimated)")
+    rows = []
+    for k in ("TC", "HDL", "LDL", "TG"):
+        unit, normal = BIOMARKER_INFO[k]
+        rows.append({"Biomarker": NAMES[k], f"Value ({unit})": b[k], "Category": state["categories"][k],
+                     "Normal range": normal, "Direction": "↓ better" if k == "HDL" else "↑ worse"})
+    for label, key, fmt in (("VLDL", "VLDL", "{:.1f}"), ("Non-HDL", "Non_HDL", "{:.1f}"),
+                            ("TC/HDL ratio", "TC_HDL_ratio", "{:.2f}"), ("LDL/HDL ratio", "LDL_HDL_ratio", "{:.2f}"),
+                            ("AIP (log₁₀ TG/HDL)", "AIP", "{:.3f}")):
+        rows.append({"Biomarker": label, f"Value ({'mg/dL' if key in ('VLDL', 'Non_HDL') else 'ratio'})":
+                     fmt.format(state["derived"][key]), "Category": "—",
+                     "Normal range": {"VLDL": "2-30", "Non_HDL": "< 130", "TC_HDL_ratio": "< 4.5",
+                                      "LDL_HDL_ratio": "< 2.0", "AIP": "< 0.21"}[key], "Direction": "↑ worse"})
+    lip = pd.DataFrame(rows)
+    st.dataframe(lip.style.applymap(lambda c: f"color: {color_for(c)}; font-weight: bold", subset=["Category"]),
+                 use_container_width=True, hide_index=True)
+
+    st.subheader("Inflammatory & Thrombosis Markers")
+    i1, i2, i3 = st.columns(3)
+    i1.metric("CRP (inflammation)", f"{b['CRP']:.2f} mg/L", state["categories"]["CRP"],
+              delta_color="inverse" if "Low" in state["categories"]["CRP"] else "normal")
+    i2.metric("D-Dimer (thrombosis)", f"{b['DD']:.2f} mg/L", state["categories"]["DD"],
+              delta_color="inverse" if state["categories"]["DD"] == "Normal" else "normal")
+    i3.metric("Adjusted CRP (HDL-modified)", f"{state['adjusted']['CRP_adj']:.2f} mg/L",
+              f"HDL protection ×{state['adjusted']['HDL_protection']}")
+    st.caption(f"Interactions (§6.11): TC context multiplier ×{state['adjusted']['CRP_mult']} from CRP; "
+               f"adjusted TC {state['adjusted']['TC_adj']:.0f} mg/dL · D-Dimer includes CRP linkage (+1.2 × CRP_norm).")
+
+# --------------------------------------------------------------------------- #
+# 72-factor table
+# --------------------------------------------------------------------------- #
+with tabs[2]:
+    st.subheader("The 72 Factors — all normalized values (doc Chapter 5)")
+    fac = state["factors"]
+    rows = []
+    for fid in FACTOR_IDS:
+        spec = FACTORS[fid]
+        links = ", ".join(f"{bm} (w={w}, {'+' if d > 0 else '−'})"
+                          for bm, (w, d) in sorted(spec.weights.items()))
+        rows.append({"ID": fid, "Factor": spec.name, "Source": spec.source, "Category": spec.category,
+                     "Raw range": f"{spec.raw_min:g} – {spec.raw_max:g}",
+                     "Normalized (0-1)": fac.get(fid), "Reading": spec.direction,
+                     "Biomarker links (weight, dir)": links or "—"})
+    fdf = pd.DataFrame(rows)
+    cat_filter = st.multiselect("Filter by category", sorted(fdf["Category"].unique()))
+    view = fdf[fdf["Category"].isin(cat_filter)] if cat_filter else fdf
+    st.caption(f"Showing {len(view)} / 72 factors · normalization F_norm = (raw − min) / (max − min), clipped [0,1]")
+    st.dataframe(view.style.format({"Normalized (0-1)": "{:.3f}"}).background_gradient(
+        subset=["Normalized (0-1)"], cmap="RdYlGn_r", vmin=0, vmax=1), use_container_width=True, height=600)
+
+    st.subheader("Factor categories coverage")
+    cc = fdf.groupby("Category")["Normalized (0-1)"].mean().sort_values(ascending=False)
+    st.bar_chart(cc)
+
+# --------------------------------------------------------------------------- #
+# 7) Baseline comparison
+# --------------------------------------------------------------------------- #
+with tabs[3]:
+    st.subheader("Personalized Baseline Comparison (doc §9.3)")
+    twin_baselines = snap.get("baselines", {})
+    stats = twin_baselines.get("stats", {})
+    recent = twin_baselines.get("recent", {})
+    rows = []
+    for k in ("TC", "HDL", "LDL", "TG", "CRP", "DD"):
+        st_ = stats.get(k, {})
+        n = st_.get("n", 0)
+        mean = st_.get("mean")
+        dq = recent.get(k, [])
+        cur = state["biomarkers"].get(k)
+        z = state["zscores"].get(k)
+        import math as _m
+        sd = None
+        if len(dq) >= 2:
+            arr = np.asarray(dq)
+            sd = float(arr.std(ddof=1))
+        pct = round(100 * (cur - mean) / mean, 1) if (mean and cur is not None) else None
+        sig = bool(z is not None and abs(z) > 2.0)
+        rows.append({"Biomarker": k, "n readings": n, "Baseline mean": round(mean, 2) if mean else None,
+                     "Baseline SD": round(sd, 3) if sd else None, "Current": cur,
+                     "Z-score": z, "% change": pct,
+                     "Significant (|Z|>2)": "⚠️ YES" if sig else "no"})
+    bdf = pd.DataFrame(rows)
+    st.dataframe(bdf.style.applymap(lambda v: "color: #e74c3c; font-weight: bold" if v == "⚠️ YES" else "",
+                               subset=["Significant (|Z|>2)"]), use_container_width=True, hide_index=True)
+    st.caption("Baseline established after 5 readings; significant deviation |Z| > 2, critical |Z| > 3 (§9.3).")
+
+# --------------------------------------------------------------------------- #
+# 6) Cluster assignment
+# --------------------------------------------------------------------------- #
+with tabs[4]:
+    st.subheader("Risk Cluster Assignment (K-Means, K=4 — doc Chapter 8)")
+    cl = state["cluster"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Cluster", cl["label"])
+    c2.metric("Confidence", f"{cl['confidence'] * 100:.0f}%",
+              "clear assignment" if cl["confidence"] > 0.6 else "borderline patient")
+    c3.metric("Cluster mean CVD (cohort)", f"{cl['cluster_cvd_mean'] or '—'}")
+
+    cohort_X, cohort_cvd = generate_cohort(160, seed=7)
+    clusterer = BiomarkerClusterer().fit(cohort_X, cohort_cvd)
+    pts = clusterer.cohort_points_2d(cohort_X)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rh["day"], y=rh["risk"] * 100, mode="lines", name="risk",
-                             line=dict(color="#d62728", width=2)))
-    if twin.confidence.history:
-        ch = pd.DataFrame(twin.confidence.history, columns=["day", "width"])
-        merged = rh.merge(ch, on="day", how="left").ffill()
-        half = merged["width"] / 2 * 100
-        fig.add_trace(go.Scatter(x=merged["day"], y=(merged["risk"] * 100 + half), mode="lines",
-                                 line=dict(width=0), showlegend=False, hoverinfo="skip"))
-        fig.add_trace(go.Scatter(x=merged["day"], y=(merged["risk"] * 100 - half), mode="lines",
-                                 fill="tonexty", line=dict(width=0), name="95% CI", hoverinfo="skip"))
-    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
+    for label in sorted(pts["cluster"].unique()):
+        sub = pts[pts["cluster"] == label]
+        fig.add_trace(go.Scatter(x=sub["pc1"], y=sub["pc2"], mode="markers", name=label,
+                                 marker=dict(size=6, opacity=0.55)))
+    fig.add_trace(go.Scatter(x=[cl["pc1"]], y=[cl["pc2"]], mode="markers",
+                             marker=dict(size=18, color="black", line=dict(width=2, color="white")),
+                             name="⭐ THIS PATIENT"))
+    fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10),
+                      xaxis_title="PC1", yaxis_title="PC2")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Patient distances to cluster centers: {cl['distances']} · "
+               "confidence = 1 − d_own/max(d_any) (§8.5)")
+
+# --------------------------------------------------------------------------- #
+# 8) Trends
+# --------------------------------------------------------------------------- #
+with tabs[5]:
+    st.subheader("Biomarker Trends")
+    fig = go.Figure()
+    for k, color in (("TC", "#e74c3c"), ("HDL", "#2ecc71"), ("LDL", "#e67e22"), ("TG", "#8e44ad")):
+        fig.add_trace(go.Scatter(x=bio_df.index, y=bio_df[k], mode="lines", name=f"{k} (mg/dL)",
+                                 line=dict(color=color)))
+    fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10),
+                      yaxis_title="mg/dL", xaxis_title="day")
+    st.plotly_chart(fig, use_container_width=True)
+
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=bio_df.index, y=bio_df["CRP"], mode="lines", name="CRP (mg/L)",
+                              line=dict(color="#c0392b")))
+    fig2.add_trace(go.Scatter(x=bio_df.index, y=bio_df["DD"], mode="lines", name="D-Dimer (mg/L)",
+                              line=dict(color="#16a085")))
+    fig2.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="mg/L")
+    st.plotly_chart(fig2, use_container_width=True)
+
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(x=bio_df.index, y=bio_df["CVD"], mode="lines", name="CVD risk (0-1)",
+                              line=dict(color="#2c3e50", width=3)))
+    fig3.add_hrect(y0=0.25, y1=0.5, line_width=0, fillcolor="#f1c40f", opacity=0.08)
+    fig3.add_hrect(y0=0.5, y1=0.75, line_width=0, fillcolor="#e67e22", opacity=0.08)
+    fig3.add_hrect(y0=0.75, y1=1.0, line_width=0, fillcolor="#e74c3c", opacity=0.08)
+    fig3.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), yaxis_range=[0, 1])
+    st.plotly_chart(fig3, use_container_width=True)
+
+# --------------------------------------------------------------------------- #
+# 9) Alerts
+# --------------------------------------------------------------------------- #
+with tabs[6]:
+    st.subheader("Alerts (INFO / WARNING / CRITICAL)")
+    alerts = snap["alerts_raised"]
+    if not alerts:
+        st.success("No alerts raised during the monitored period.")
+    else:
+        level_color = {"critical": "error", "warning": "warning", "info": "info"}
+        for a in alerts[-15:][::-1]:
+            getattr(st, level_color.get(a["level"], "info"))(f"**[{a['level'].upper()}]** `{a['code']}` — {a['message']}")
+        st.caption(f"{len(alerts)} alerts total (showing latest 15, deduplicated daily)")
+
+# --------------------------------------------------------------------------- #
+# 10) AI explanation
+# --------------------------------------------------------------------------- #
+with tabs[7]:
+    st.subheader("Explainable AI — WHY these values? (doc Chapter 10)")
+    tcps = state["top_contributions"]
+    for bm in ("TC", "HDL", "TG", "CRP", "DD"):
+        contribs = tcps.get(bm, [])
+        if not contribs:
+            continue
+        val = b[bm]
+        unit = BIOMARKER_INFO[bm][0]
+        st.markdown(f"**{NAMES[bm]} = {val} {unit} ({state['categories'][bm]})** is mainly influenced by:")
+        for i, c in enumerate(contribs[:5], 1):
+            arrow = "↑" if c["contribution"] > 0 else "↓"
+            st.markdown(f"{i}. {arrow} **{c['name']}** ({c['fid']}) — contribution {c['contribution']:+.1f} "
+                        f"(value {c['value']:.2f} × weight {c['weight']:.0f}, {c['direction']})")
+        st.markdown("")
+
+# --------------------------------------------------------------------------- #
+# Wearable twin (previous engine)
+# --------------------------------------------------------------------------- #
+with tabs[8]:
+    st.subheader("Wearable Digital Twin (adaptive factor engine)")
+    wearable = DigitalTwin.from_dict(wear_snap)
+    learning = wearable.learning_summary()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Wearable-twin risk", f"{wearable.risk_score * 100:.0f}/100", wearable.risk_category)
+    c2.metric("Trend", wearable.risk_trend() or "—")
+    c3.metric("Warm personal baselines", f"{learning.get('warm_baselines', 0)}/{learning.get('channels_tracked', 0)}")
+    c4.metric("CI precision gain", f"{learning.get('precision_gain_pct', 0):+.1f}%")
+
+    comp = wearable._compute_risk()
+    table = RiskExplainer.explain_composite(comp).head(10)
+    st.dataframe(table, use_container_width=True)
+    rh = pd.DataFrame(wearable.risk_history, columns=["day", "risk"])
+    fig = go.Figure(go.Scatter(x=rh["day"], y=rh["risk"] * 100, mode="lines",
+                               line=dict(color="#d62728", width=2)))
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
                       yaxis_title="risk (0-100)", xaxis_title="day")
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("This engine scores daily wearable aggregates with EWMA state + adaptive weights; "
+               "the biomarker twin (other tabs) estimates blood biomarkers from the 72 factors.")
 
-    st.subheader("Physiological channels")
-    channels = ["resting_heart_rate", "hrv_rmssd", "systolic_bp", "diastolic_bp",
-                "sleep_hours", "steps", "nocturnal_spo2_pct"]
-    sel = st.multiselect("Channels", channels, default=["resting_heart_rate", "hrv_rmssd", "systolic_bp"])
-    if sel:
-        fig2 = go.Figure()
-        for c in sel:
-            fig2.add_trace(go.Scatter(x=history["day_index"], y=history[c], mode="lines", name=c))
-        fig2.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="day")
-        st.plotly_chart(fig2, use_container_width=True)
-    st.caption("Raw daily observations (points) — the twin scores their EWMA-smoothed state.")
-
-# --------------------------------------------------------------------------- #
-# 5) Phenotypes
-# --------------------------------------------------------------------------- #
-with tab_pheno:
-    st.subheader("Daily physiological phenotypes")
-    try:
-        cl = PhenotypeClusterer().fit(history)
-        summary = cl.summary()
-        st.caption(f"k = {summary['k']} (silhouette {summary['silhouette']})")
-        pdf = pd.DataFrame([{**c["means"], "phenotype": c["label"], "days": c["n_days"], "share %": c["share"] * 100}
-                            for c in summary["clusters"]])
-        st.dataframe(pdf, use_container_width=True)
-
-        pts = cl.transform_2d(history)
-        labels = cl.predict(history)
-        fig = go.Figure()
-        for cid in sorted(labels.unique()):
-            mask = labels == cid
-            fig.add_trace(go.Scatter(
-                x=pts.loc[mask, "pc1"], y=pts.loc[mask, "pc2"], mode="markers",
-                name=cl.labels_map_.get(int(cid), f"cluster {cid}"),
-            ))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10),
-                          xaxis_title="PC1", yaxis_title="PC2")
-        st.plotly_chart(fig, use_container_width=True)
-    except ValueError as exc:
-        st.warning(f"Phenotype clustering unavailable: {exc}")
-
-# --------------------------------------------------------------------------- #
-# 6) ML model
-# --------------------------------------------------------------------------- #
-with tab_model:
-    st.subheader("Trained risk model (population-level)")
-    artifact, metrics = load_model_bundle()
-    if artifact is None:
-        st.warning("No trained model found. Run `python train_model.py` first.")
-    else:
-        from src.model_training import twin_feature_vector
-
-        ref_df = artifact.get("data_sample")
-        if ref_df is None:
-            ref_df = history
-        row = twin_feature_vector(twin, ref_df)
-        prob = float(artifact["model"].predict_proba(row)[0, 1])
-        thr = artifact["threshold"]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Model risk probability", f"{prob:.2f}",
-                  "HIGH" if prob >= thr else "low", delta_color="inverse")
-        c2.metric("Decision threshold", f"{thr:.2f}", "Youden-J")
-        c3.metric("Holdout ROC-AUC", f"{metrics['holdout_calibrated']['roc_auc']}" if metrics else "n/a")
-        st.caption("Model input mapped from twin state: Age, Sex, RestingBP←systolic EWMA, "
-                   "Cholesterol←latest labs, FastingBS←diabetes. Exercise-test features use training-set defaults.")
-        st.dataframe(row.T.rename(columns={0: "value"}).astype(str), use_container_width=True)
-        if metrics:
-            hm = metrics["holdout_calibrated"]
-            st.markdown(f"**Holdout performance:** accuracy {hm['accuracy']} · sensitivity {hm['sensitivity']} · "
-                        f"specificity {hm['specificity']} · PR-AUC {hm['pr_auc']} · Brier {hm['brier']}")
-            imp = pd.DataFrame(metrics["importances"][:8])
-            fig = go.Figure(go.Bar(x=imp["importance"], y=imp["feature"], orientation="h"))
-            fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+# 11) Disclaimer
+st.markdown("---")
+st.error("■ RESEARCH PROTOTYPE — All biomarker values are AI estimates derived from sensor data. "
+         "This system is NOT a medical device and is NOT approved for clinical diagnosis. "
+         "Always confirm findings with laboratory blood tests and consult a qualified healthcare professional.")

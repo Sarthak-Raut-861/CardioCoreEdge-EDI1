@@ -92,8 +92,9 @@ class PersonalBaselineTracker:
     WARMUP_DAYS = 14          # days before baselines replace population norms
     ANOMALY_Z = 2.5
 
-    def __init__(self, window: int = 90) -> None:
+    def __init__(self, window: int = 90, min_cv: float = 0.03) -> None:
         self.window = window
+        self.min_cv = min_cv   # channels below this CV produce no z-scores
         self.stats: Dict[str, RunningStats] = {}
         self.recent: Dict[str, Deque[float]] = {}
 
@@ -117,7 +118,7 @@ class PersonalBaselineTracker:
             if len(dq) >= 10:
                 hist = np.asarray(dq)
                 mu, sd = float(hist.mean()), float(hist.std(ddof=1)) or 1e-9
-                if abs(mu) > 1e-9 and (sd / abs(mu)) >= 0.03:
+                if abs(mu) > 1e-9 and (sd / abs(mu)) >= self.min_cv:
                     zs[key] = round((x - mu) / sd, 3)
             dq.append(x)
         return zs

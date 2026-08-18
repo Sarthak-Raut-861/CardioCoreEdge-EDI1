@@ -144,6 +144,41 @@ def ml_report(twin: DigitalTwin, model_path: str | None = None) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def biomarker_report(profile_name: str, scenario: str, seed: int, days: int) -> None:
+    """72-factor biomarker twin report (documentation Chapters 5-10)."""
+    from src.biomarker_twin import BiomarkerTwin
+
+    profile = PRESET_PROFILES[profile_name]
+    source = SimulatedWearableSource(profile, scenario=scenario, seed=seed, lab_interval_days=90)
+    twin = BiomarkerTwin(profile.to_dict())
+    for i, obs in enumerate(source.next_days(days)):
+        twin.update(obs, day_index=i)
+    s = twin.state
+    b = s.biomarkers
+
+    print("\n--- BIOMARKER DIGITAL TWIN (72-factor engine) -------------------")
+    print(f"{'TC':<5} {b['TC']:>6.0f} mg/dL  {s.categories['TC']:<15} | "
+          f"HDL  {b['HDL']:>6.0f} mg/dL  {s.categories['HDL']}")
+    print(f"{'LDL':<5} {b['LDL']:>6.0f} mg/dL  {s.categories['LDL']:<15} | "
+          f"TG   {b['TG']:>6.0f} mg/dL  {s.categories['TG']}")
+    print(f"{'CRP':<5} {b['CRP']:>6.2f} mg/L   {s.categories['CRP']:<15} | "
+          f"D-Dimer {b['DD']:>5.2f} mg/L  {s.categories['DD']}")
+    d = s.derived
+    print(f"Derived: VLDL {d['VLDL']:.0f} | Non-HDL {d['Non_HDL']:.0f} | TC/HDL {d['TC_HDL_ratio']} | "
+          f"LDL/HDL {d['LDL_HDL_ratio']} | AIP {d['AIP']}")
+    print(f"CVD risk {s.cvd_score:.2f} ({s.cvd_category}) | trend {twin.trend} | "
+          f"CTR {s.ctr:.2f} ({s.ctr_category}) | cluster: {s.cluster['label']} "
+          f"(confidence {s.cluster['confidence']:.0%})")
+    print("Pathways: " + " · ".join(f"{k} {v:.2f}" for k, v in s.pathway_risk.items()))
+    for bm in ("TC", "CRP", "DD"):
+        tops = s.top_contributions.get(bm, [])[:3]
+        pretty = ", ".join(f"{c['fid']} {c['name'][:20]} ({c['contribution']:+.1f})" for c in tops)
+        print(f"Top {bm} drivers: {pretty}")
+    if twin.alerts_raised:
+        print(f"Alerts: {len(twin.alerts_raised)} (latest: {twin.alerts_raised[-1]['message']})")
+    print(f"Personal baselines: {sum(1 for k in ('TC','HDL','LDL','TG','CRP','DD') if twin.baselines.is_warm(k))}/6 warm")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="CardioCore cardiovascular digital twin demo")
     p.add_argument("--days", type=int, default=60, help="days to simulate (default 60)")
@@ -163,8 +198,9 @@ def main(argv=None) -> int:
     history = simulate_history(args.days, PRESET_PROFILES[args.profile], scenario=args.scenario,
                                seed=args.seed, lab_interval_days=90)
     final_report(twin, history)
+    biomarker_report(args.profile, args.scenario, args.seed, args.days)
     if args.ml:
-        ml_report(twin)
+        ml_report(twin, args.model)
     return 0
 
 

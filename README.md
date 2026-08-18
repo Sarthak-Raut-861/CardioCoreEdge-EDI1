@@ -24,11 +24,18 @@ cardiovascular_twin/
 └── tests/                     # pytest suite (66 tests)
 ```
 
-**Pipeline:** daily wearable aggregates + sparse labs + demographics → `FactorEngine`
-(piecewise-linear normalization, weighted composite) → `DigitalTwin` (EWMA state
-assimilation, 0..1 risk score & category, trend, safety-net alerts) →
-`PhenotypeClusterer` (recurring physiological states) → `RiskExplainer`
-(ranked drivers, narrative, SHAP when an XGBoost model is attached).
+**Pipeline (documentation v1.0, Chapters 5-11):** daily multimodal observations +
+profile → **72-factor framework** (`factors72.py`, doc Ch. 5) → **biomarker
+estimation** TC/HDL/TG/LDL/CRP/D-Dimer with weighted formulas, derived values,
+interactions, CTR & CVD scores (`biomarker_engine.py`, Ch. 6) → **biomarker
+digital twin** with 11-step update cycle, personal baselines, trend, alerts
+(`biomarker_twin.py`, Ch. 9) → **K=4 clustering** with PCA + confidence (Ch. 8) →
+**dashboard** with gauge, radar, lipid table, 72-factor table, baselines,
+cluster, trends, alerts and top-5 explanations per biomarker (Ch. 11).
+
+Alongside: the wearable factor engine (`factor_engine.py`) with EWMA state
+assimilation, adaptive weights and confidence intervals (`adaptive_engine.py`),
+phenotype clustering and the real-data XGBoost model (holdout AUC 0.925).
 
 ## Quick start
 
@@ -39,11 +46,10 @@ pip install -r cardiovascular_twin/requirements.txt
 cd cardiovascular_twin
 python main.py --profile at_risk --scenario declining --ml
 
-# other options
-python main.py --profile healthy --scenario improving --days 90
-python main.py --help
+# interactive dashboard (gauge, radar, 72 factors, clusters, alerts, XAI)
+streamlit run dashboard/app.py
 
-# run the test suite
+# run the test suite (131 tests)
 python -m pytest tests/ -q
 ```
 
@@ -91,6 +97,8 @@ Column names differing from the UCI schema can be mapped in
 - [ ] Streamlit dashboard (`dashboard/app.py`)
 - [ ] FastAPI service layer
 - [x] ML risk model trained on real data (UCI-combined, 918 records, holdout AUC 0.925)
+- [x] 72-factor framework + biomarker estimation engine (TC/HDL/TG/LDL/CRP/D-Dimer) per documentation v1.0
+- [x] Biomarker digital twin (11-step cycle, baselines, K=4 clustering) + Streamlit dashboard (gauge/radar/tables/XAI)
 - [ ] Real wearable-data ingestion (CSV export / cloud API)
 
 ## Disclaimer

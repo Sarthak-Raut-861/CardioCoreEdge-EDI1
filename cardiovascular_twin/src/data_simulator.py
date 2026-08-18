@@ -46,7 +46,12 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 @dataclass
 class UserProfile:
-    """Static demographic + clinical attributes of the twin's owner."""
+    """Static demographic + clinical attributes of the twin's owner.
+
+    Beyond the wearable baselines, the 72-factor framework (doc Ch. 5) needs
+    questionnaire-style inputs: waist, ethnicity risk, histories, diet and
+    smoking detail. All optional with neutral defaults.
+    """
 
     name: str = "User"
     age: int = 42
@@ -56,6 +61,22 @@ class UserProfile:
     smoker: bool = False
     diabetic: bool = False
     family_history: bool = False           # premature CVD in 1st-degree relatives
+
+    # questionnaire fields (F48-F67) — 0-1 unless unit noted
+    waist_cm: Optional[float] = None       # cm; derived from BMI if None
+    ethnicity_risk: float = 0.3            # population risk multiplier score
+    waist_hip_ratio: Optional[float] = None
+    chol_history: float = 0.2              # known cholesterol history F56
+    htn_history: float = 0.1               # hypertension history F57
+    clot_history: float = 0.0              # previous clot history F58
+    thyroid: float = 0.05                  # thyroid disorder F59
+    sat_fat: float = 0.3                   # saturated fat intake F61
+    sugar: float = 0.3                     # sugar/refined carbs F62
+    vegetables: float = 0.6                # vegetable/fruit intake F63
+    alcohol: float = 0.2                   # alcohol consumption F64
+    omega3: float = 0.5                    # omega-3 intake F65
+    smoking_intensity: float = 0.6         # F66 (used when smoker)
+    pack_years: float = 12.0               # F67 (used when smoker)
 
     # physiological baselines (used as simulator anchors)
     baseline_resting_hr: float = 62.0      # bpm
@@ -81,12 +102,18 @@ class UserProfile:
 PRESET_PROFILES: Dict[str, UserProfile] = {
     "healthy": UserProfile(
         name="Healthy User", age=38, smoker=False, diabetic=False, family_history=False,
+        waist_cm=82, ethnicity_risk=0.25, waist_hip_ratio=0.85,
+        chol_history=0.1, htn_history=0.05, clot_history=0.0, thyroid=0.02,
+        sat_fat=0.25, sugar=0.25, vegetables=0.8, alcohol=0.1, omega3=0.7,
         baseline_resting_hr=58, baseline_hrv_rmssd=65, baseline_systolic=114,
         baseline_diastolic=73, baseline_total_cholesterol=175, baseline_hdl=62,
         baseline_triglycerides=95,
     ),
     "typical": UserProfile(
         name="Typical User", age=45, smoker=False, diabetic=False, family_history=False,
+        waist_cm=94, ethnicity_risk=0.3, waist_hip_ratio=0.92,
+        chol_history=0.35, htn_history=0.2, clot_history=0.05, thyroid=0.05,
+        sat_fat=0.5, sugar=0.5, vegetables=0.45, alcohol=0.3, omega3=0.4,
         baseline_resting_hr=64, baseline_hrv_rmssd=48, baseline_systolic=122,
         baseline_diastolic=79, baseline_total_cholesterol=195, baseline_hdl=50,
         baseline_triglycerides=140,
@@ -126,8 +153,8 @@ class WearableDataSource(abc.ABC):
 _SCENARIO_DRIFT = {
     #                 RHR      HRV      SBP      DBP     sleep   steps
     "stable":     (0.0000,  0.0000,  0.0000,  0.0000,  0.0000,  0.0000),
-    "improving":  (-0.0018,  0.0032, -0.0014, -0.0011,  0.0016,  0.0024),
-    "declining":  (0.0022, -0.0036,  0.0017,  0.0013, -0.0019, -0.0025),
+    "improving":  (-0.0027,  0.0048, -0.0021, -0.0017,  0.0024,  0.0036),
+    "declining":  (0.0033, -0.0054,  0.0026,  0.0020, -0.0029, -0.0038),
 }
 
 
@@ -179,11 +206,11 @@ class SimulatedWearableSource(WearableDataSource):
 
         p = self.profile
         self._channels: Dict[str, _Channel] = {
-            "resting_heart_rate": _Channel(p.baseline_resting_hr, p.baseline_resting_hr, 0.25, 1.6, lo=35, hi=130),
-            "hrv_rmssd":          _Channel(p.baseline_hrv_rmssd,  p.baseline_hrv_rmssd,  0.25, 4.0, lo=8,  hi=180),
-            "systolic_bp":        _Channel(p.baseline_systolic,   p.baseline_systolic,   0.25, 4.5, lo=80, hi=220),
-            "diastolic_bp":       _Channel(p.baseline_diastolic,  p.baseline_diastolic,  0.25, 3.2, lo=50, hi=140),
-            "sleep_hours":        _Channel(7.2,  7.2,  0.35, 0.75, lo=0.0, hi=11.0),
+            "resting_heart_rate": _Channel(p.baseline_resting_hr, p.baseline_resting_hr, 0.25, 1.2, lo=35, hi=130),
+            "hrv_rmssd":          _Channel(p.baseline_hrv_rmssd,  p.baseline_hrv_rmssd,  0.25, 3.0, lo=8,  hi=180),
+            "systolic_bp":        _Channel(p.baseline_systolic,   p.baseline_systolic,   0.25, 2.8, lo=80, hi=220),
+            "diastolic_bp":       _Channel(p.baseline_diastolic,  p.baseline_diastolic,  0.25, 2.2, lo=50, hi=140),
+            "sleep_hours":        _Channel(7.2,  7.2,  0.35, 0.60, lo=0.0, hi=11.0),
             "deep_sleep_pct":     _Channel(18.0, 18.0, 0.30, 2.2, lo=2.0, hi=40.0),
             "steps":              _Channel(8500.0, 8500.0, 0.35, 1900.0, lo=0, hi=40000),
             "active_minutes":     _Channel(42.0, 42.0, 0.35, 12.0, lo=0, hi=300),
