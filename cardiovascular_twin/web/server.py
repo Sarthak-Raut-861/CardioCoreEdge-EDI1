@@ -414,7 +414,17 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(str(static_dir / "index.html"))
+    return FileResponse(str(static_dir / "index.html"), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/styles.css")
+def root_styles():
+    return FileResponse(str(static_dir / "styles.css"), media_type="text/css", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/app.js")
+def root_js():
+    return FileResponse(str(static_dir / "app.js"), media_type="application/javascript", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 init_db()

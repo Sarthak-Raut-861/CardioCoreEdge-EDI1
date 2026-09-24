@@ -2,18 +2,33 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CardioCore · Patient Portal</title>
-  <meta name="description" content="AI-driven personalized cardiovascular digital twin — patient portal" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>CardioCore · Personal Cardiovascular Command Center</title>
+  <meta name="description" content="AI-Driven Personalized Cardiovascular Digital Twin for Continuous Cardiac Risk Assessment Using Multimodal Wearable Sensing" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><text y='19' font-size='19'>❤️</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 <body>
-  <div id="toast" class="toast" hidden></div>
-  <main id="app" class="app"><!-- views rendered by app.js --></main>
-  <script src="/static/app.js"></script>
+  <!-- Global Notification Toast -->
+  <div id="toast" class="toast" hidden role="alert" aria-live="assertive"></div>
+
+  <!-- Global Interactive Modal / Drawer -->
+  <div id="modal-backdrop" class="modal-backdrop" hidden>
+    <div id="modal-container" class="modal-dialog" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div id="modal-title" class="modal-title"></div>
+        <button id="modal-close" class="btn-icon" aria-label="Close modal">✕</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Main Single Page Application Host -->
+  <main id="app" class="app" role="main"></main>
+
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
